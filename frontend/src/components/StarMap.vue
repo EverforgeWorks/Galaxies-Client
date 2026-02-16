@@ -1,27 +1,18 @@
 <script setup lang="ts">
 /**
- * StarMap Component
- * * A HTML5 Canvas-based visualization of a star system.
- * Features:
- * - Cartesian coordinate mapping to responsive canvas
- * - Fuel/Distance calculation based on ship stats
- * - Interactive star selection
- * - "Asteroids-style" warp animation vector graphics
+ * StarMap Component (Refactored)
+ * Implements "Server-First" Navigation:
+ * 1. User Clicks Warp
+ * 2. Client sends request to Go Backend
+ * 3. Awaits Success/Fail
+ * 4. IF Success: Play Animation using snapshot of start coordinates
+ * 5. IF Fail: Show Error, do not move.
  */
 
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { useGameStore } from '../stores/gameStore'
 
-// --- PROPS & EMITS ---
-const props = defineProps({
-  // Array of planet objects { key, name, coordinates: [x, y], ... }
-  universe: Array as () => any[],
-  // The key of the planet the ship is currently at
-  currentLocation: String,
-  // Ship object containing { fuel, burn_rate, ... }
-  ship: Object as () => any
-})
-
-const emit = defineEmits(['travel'])
+const store = useGameStore()
 
 // --- STATE MANAGEMENT ---
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -34,61 +25,67 @@ const warpProgress = ref(0) // 0.0 to 1.0
 let animationFrameId: number | null = null
 let animationStartTime: number = 0
 
+// Critical: Snapshot of where the ship WAS before the warp command succeeded
+const animationStartCoords = ref<number[]>([0,0])
+
 // --- CONSTANTS ---
-// Universe logic dimensions (approx -20 to +20). 55 ensures padding.
 const GAME_WORLD_SIZE = 55 
-// Duration of the warp flight in milliseconds
 const WARP_DURATION_MS = 2500 
 
 // --- COMPUTED DATA ---
-/**
- * Resolves the full object of the current location based on the prop key.
- */
 const currentPlanetObj = computed(() => {
-    return props.universe?.find(p => p.key === props.currentLocation)
+    return store.universe.find(p => p.key === store.ship?.location_key)
 })
 
-/**
- * Calculates distance, fuel cost, and feasibility of travel.
- * Returns null if no valid destination is selected or if destination == current.
- */
 const flightPlan = computed(() => {
-    if (!selectedStar.value || !currentPlanetObj.value || !props.ship) return null
-    if (selectedStar.value.key === props.currentLocation) return null
+    if (!selectedStar.value || !currentPlanetObj.value || !store.ship) return null
+    if (selectedStar.value.key === store.ship.location_key) return null
 
     const p1 = currentPlanetObj.value.coordinates || [0,0]
     const p2 = selectedStar.value.coordinates || [0,0]
     
     // Euclidean distance
     const dist = Math.sqrt(Math.pow(p2[0]-p1[0], 2) + Math.pow(p2[1]-p1[1], 2))
-    const cost = Math.ceil(dist * (props.ship.burn_rate || 1.0))
+    const cost = Math.ceil(dist * (store.ship.base_burn_rate || 1.0))
     
-    return { distance: dist.toFixed(1), cost: cost, canAfford: props.ship.fuel >= cost }
+    return { 
+        distance: dist.toFixed(1), 
+        cost: cost, 
+        canAfford: store.ship.fuel >= cost 
+    }
 })
 
-// --- ANIMATION LOGIC ---
+// --- WARP LOGIC ---
 
-/**
- * Initiates the warp sequence.
- * 1. Locks UI interactions.
- * 2. Starts the animation loop.
- * 3. Emits 'travel' only upon completion.
- */
-function startWarpSequence() {
-  if (isWarping.value || !flightPlan.value?.canAfford) return
+async function startWarpSequence() {
+  if (isWarping.value || !flightPlan.value || !selectedStar.value) return
+  if (!currentPlanetObj.value) return
+
+  // 1. Snapshot Start Position (Critical for animation)
+  animationStartCoords.value = [...currentPlanetObj.value.coordinates]
+
+  // 2. Execute Server Call FIRST (Server-First Authority)
+  const destKey = selectedStar.value.key
   
+  // This will await the Wails call. 
+  // If successful, store.ship.location_key updates immediately to the NEW planet.
+  const success = await store.travel(destKey)
+
+  // 3. If failed (e.g. 402 Payment Required), abort - Do not animate
+  if (!success) {
+      selectedStar.value = null // Deselect to clear state
+      return
+  }
+
+  // 4. If success, Play Animation
+  // Note: store.ship.location_key is ALREADY the new planet now.
+  // We use animationStartCoords to draw the ship at the "Old" location and lerp to "New".
   isWarping.value = true
   warpProgress.value = 0
   animationStartTime = performance.now()
-  
   animateFrame()
 }
 
-/**
- * The recursive animation loop.
- * Calculates progress based on elapsed time to ensure consistent speed 
- * regardless of frame rate.
- */
 function animateFrame() {
   const now = performance.now()
   const elapsed = now - animationStartTime
@@ -97,7 +94,7 @@ function animateFrame() {
   const progress = Math.min(elapsed / WARP_DURATION_MS, 1.0)
   warpProgress.value = progress
 
-  draw() // Redraw canvas with new ship position
+  draw() 
 
   if (progress < 1.0) {
     animationFrameId = requestAnimationFrame(animateFrame)
@@ -105,19 +102,15 @@ function animateFrame() {
     // Animation Complete
     isWarping.value = false
     animationFrameId = null
-    // Actually move the ship in the parent state
-    emit('travel', selectedStar.value.key)
-    // Reset selection to null or keep it? usually resetting is cleaner after move
     selectedStar.value = null
+    
+    // Trigger a full data refresh to get new market data/contracts for the new planet
+    store.refreshAll()
   }
 }
 
 // --- DRAWING ENGINE ---
 
-/**
- * Primary Render Loop.
- * Handles background, grid, planets, hyperlanes, UI overlays, and the active ship.
- */
 function draw() {
   const ctx = canvasRef.value?.getContext('2d')
   if (!ctx || !canvasRef.value) return
@@ -126,7 +119,7 @@ function draw() {
   const w = canvasRef.value.width
   const h = canvasRef.value.height
   
-  // Safety: Don't draw on collapsed canvas
+  // Safety check
   if (w === 0 || h === 0) return 
 
   const cx = w / 2
@@ -145,7 +138,6 @@ function draw() {
   const gridSize = 5 * scale 
   
   ctx.beginPath()
-  // Draw from center out to ensure grid is centered
   for (let x = cx; x < w; x += gridSize) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
   for (let x = cx; x > 0; x -= gridSize) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
   for (let y = cy; y < h; y += gridSize) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
@@ -161,7 +153,7 @@ function draw() {
   ctx.stroke()
 
   // 5. CHECK DATA EXISTENCE
-  if (!props.universe || props.universe.length === 0) {
+  if (!store.universe || store.universe.length === 0) {
       ctx.fillStyle = '#ff3333'
       ctx.font = '16px "Courier New"'
       ctx.textAlign = 'center'
@@ -177,8 +169,8 @@ function draw() {
   ctx.lineWidth = 1
   ctx.globalAlpha = 0.15
   ctx.beginPath()
-  props.universe.forEach(p1 => {
-    props.universe?.forEach(p2 => {
+  store.universe.forEach(p1 => {
+    store.universe.forEach(p2 => {
       const c1 = p1.coordinates || [0,0]
       const c2 = p2.coordinates || [0,0]
       const dist = Math.sqrt(Math.pow(c1[0]-c2[0], 2) + Math.pow(c1[1]-c2[1], 2))
@@ -196,15 +188,15 @@ function draw() {
   ctx.globalAlpha = 1.0
 
   // 7. Draw Planets
-  props.universe.forEach(p => {
+  store.universe.forEach(p => {
     if (!p.coordinates) return
 
     const x = cx + p.coordinates[0] * scale
     const y = cy - p.coordinates[1] * scale // Flip Y for cartesian
     
-    const isCurrent = p.key === props.currentLocation
+    // If warping, we are "in transit", so don't highlight the current location yet
+    const isCurrent = !isWarping.value && p.key === store.ship?.location_key
     const isSelected = selectedStar.value?.key === p.key
-    const isTarget = isSelected && !isCurrent
 
     // Planet Dot
     ctx.beginPath()
@@ -229,12 +221,12 @@ function draw() {
   })
   
   // 8. Flight Vector / Target Line
-  if (selectedStar.value && props.ship && !isWarping.value) {
+  if (selectedStar.value && store.ship && !isWarping.value) {
     const p = selectedStar.value
     const x = cx + p.coordinates[0] * scale
     const y = cy - p.coordinates[1] * scale
     
-    const curr = props.universe.find(p => p.key === props.currentLocation)
+    const curr = store.universe.find(p => p.key === store.ship?.location_key)
     if (curr && curr.coordinates) {
        const startX = cx + curr.coordinates[0] * scale
        const startY = cy - curr.coordinates[1] * scale
@@ -250,8 +242,10 @@ function draw() {
   }
 
   // 9. ANIMATION LAYER: The Ship
-  if (isWarping.value && selectedStar.value && currentPlanetObj.value) {
-    const startCoords = currentPlanetObj.value.coordinates
+  if (isWarping.value && selectedStar.value) {
+    // USE SNAPSHOT COORDS (Start) -> SELECTED STAR (End)
+    // We do NOT use currentPlanetObj because that has already updated to the destination!
+    const startCoords = animationStartCoords.value
     const endCoords = selectedStar.value.coordinates
 
     // Convert Game Coords to Canvas Coords
@@ -318,7 +312,7 @@ function handleClick(e: MouseEvent) {
   const mouseX = e.clientX - rect.left
   const mouseY = e.clientY - rect.top
 
-  const clicked = props.universe?.find(p => {
+  const clicked = store.universe?.find(p => {
     if (!p.coordinates) return false
     const px = cx + p.coordinates[0] * scale
     const py = cy - p.coordinates[1] * scale
@@ -354,21 +348,34 @@ onUnmounted(() => {
   if (animationFrameId) cancelAnimationFrame(animationFrameId)
 })
 
-watch(() => [props.universe, props.currentLocation, props.ship, flightPlan.value], draw, { deep: true })
+// Deep watch on critical data to trigger redraws
+watch(() => [store.universe, store.ship?.location_key, flightPlan.value], draw, { deep: true })
 </script>
 
 <template>
   <div ref="containerRef" class="map-container">
     <canvas ref="canvasRef" @click="handleClick"></canvas>
     
-    <div v-if="selectedStar && selectedStar.key !== currentLocation && !isWarping" class="warp-controls">
+    <div v-if="selectedStar && selectedStar.key !== store.ship?.location_key && !isWarping" class="warp-controls">
       <h3>{{ selectedStar.name }}</h3>
+
+      <div v-if="store.uiState.lastError" class="error-msg">
+         ⚠ {{ store.uiState.lastError }}
+      </div>
+
       <div v-if="flightPlan" class="trip-stats">
         <div class="stat-line"><span>DIST:</span><span>{{ flightPlan.distance }} LY</span></div>
         <div class="stat-line"><span>FUEL:</span><span :class="{ 'alert': !flightPlan.canAfford }">{{ flightPlan.cost }} UNITS</span></div>
       </div>
-      <button @click="startWarpSequence" class="btn-warp" :disabled="!flightPlan?.canAfford" :class="{ 'disabled': !flightPlan?.canAfford }">
-        <span>{{ flightPlan?.canAfford ? 'INITIATE WARP' : 'INSUFFICIENT FUEL' }}</span>
+      
+      <button 
+        @click="startWarpSequence" 
+        class="btn-warp" 
+        :disabled="!flightPlan?.canAfford || store.uiState.isLoading" 
+        :class="{ 'disabled': !flightPlan?.canAfford || store.uiState.isLoading }"
+      >
+        <span v-if="store.uiState.isLoading">CALCULATING...</span>
+        <span v-else>{{ flightPlan?.canAfford ? 'INITIATE WARP' : 'INSUFFICIENT FUEL' }}</span>
       </button>
     </div>
 
@@ -399,6 +406,16 @@ canvas {
   border: 1px solid #00ff41; padding: 15px; text-align: center;
   min-width: 280px; box-shadow: 0 0 20px rgba(0, 255, 65, 0.15);
   font-family: 'Courier New', monospace; z-index: 100;
+}
+
+.error-msg {
+    color: #ff3333;
+    font-size: 0.75rem;
+    border: 1px solid #ff3333;
+    background: rgba(50,0,0,0.5);
+    padding: 5px;
+    margin-bottom: 10px;
+    font-weight: bold;
 }
 
 .warp-status {

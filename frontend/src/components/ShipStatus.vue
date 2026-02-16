@@ -1,43 +1,47 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useGameStore } from '../stores/gameStore'
 
-const props = defineProps({ 
-  ship: Object as () => any,
-  planets: Array as () => any[],
-  loading: Boolean
-})
+const store = useGameStore()
 
-const emit = defineEmits(['refuel'])
-
+// Computes the display name of the current planet based on the key
 const planetName = computed(() => {
-    if (!props.planets || !props.ship) return "UNKNOWN"
-    const p = props.planets.find(x => x.key === props.ship.location_key)
-    return p ? p.name : props.ship.location_key
+    if (!store.universe || !store.ship) return "UNKNOWN"
+    const p = store.universe.find(x => x.key === store.ship?.location_key)
+    return p ? p.name : store.ship?.location_key
 })
 
-const fuelPct = computed(() => props.ship ? (props.ship.fuel / props.ship.max_fuel) * 100 : 0)
-const fuelCost = computed(() => props.ship ? Math.floor((props.ship.max_fuel - props.ship.fuel) / 100 * 4) : 0)
+// Fuel Calculations
+const fuelPct = computed(() => store.ship ? (store.ship.fuel / store.ship.max_fuel) * 100 : 0)
+const fuelCost = computed(() => store.ship ? Math.floor((store.ship.max_fuel - store.ship.fuel) / 100 * 4) : 0)
+
+async function handleRefuel() {
+    await store.refuelShip()
+}
 </script>
 
 <template>
   <div class="status-panel">
     <div class="row">
-        <span class="ship-name">{{ ship?.name || 'NO_SIGNAL' }}</span>
+        <span class="ship-name">{{ store.ship?.name || 'NO_SIGNAL' }}</span>
         <span class="loc">@{{ planetName }}</span>
     </div>
 
     <div class="stats-grid">
         <div class="stat-cell">
             <span class="label">CREDITS</span>
-            <span class="value val-cr">{{ ship?.credits?.toLocaleString() }}</span>
+            <span class="value val-cr">{{ store.ship?.credits?.toLocaleString() }}</span>
         </div>
         <div class="stat-cell">
             <span class="label">MASS</span>
-            <span class="value">{{ ship?.base_mass }}kg</span>
+            <span class="value">{{ store.ship?.base_mass }}kg</span>
         </div>
         <div class="stat-cell">
-             <span class="label">FUEL ({{ (ship?.fuel/100).toFixed(0) }}%)</span>
-             <button class="btn-refuel" :disabled="fuelPct > 99" @click="emit('refuel')">
+             <span class="label">FUEL ({{ (store.ship?.fuel || 0) / 100 }}%)</span>
+             <button class="btn-refuel" 
+                :disabled="fuelPct > 99 || store.uiState.isLoading" 
+                @click="handleRefuel"
+             >
                 {{ fuelPct > 99 ? 'FULL' : `FILL -${fuelCost}` }}
              </button>
         </div>

@@ -1,38 +1,15 @@
 <script setup lang="ts">
 /**
  * OpsPanel Component
- * File: frontend/src/components/OpsPanel.vue
- * Description: 
- * The primary interface for managing Ship Cargo/Passengers and interacting
- * with the Planet's Job Board (Market).
- * * Features:
- * - Displays Ship Manifest (Current Inventory)
- * - Displays Planet Services (Available Contracts/Modules)
- * - Auto-sorts all contract lists by Destination Name (A-Z) -> Payout (High-Low)
- * to assist with logistics planning.
  */
-
 import { ref, computed } from 'vue'
+import { useGameStore } from '../stores/gameStore'
 
-// --- PROPS ---
-const props = defineProps({
-  // The PlayerShip object from state.go (includes .active_contracts)
-  ship: Object as () => any,
-  // The list of AvailableContracts for the CURRENT planet (Array of Contract structs)
-  jobs: Array as () => any[],
-  // The Universe.Planets array (used to resolve keys like "planet_prime" to "Terra Prime")
-  planets: Array as () => any[],
-  // Available modules for sale at this planet
-  modules: Array as () => any[]
-})
-
-// --- EMITS ---
-const emit = defineEmits(['accept', 'drop', 'buy'])
+const store = useGameStore()
 
 // --- UI STATE ---
-const mode = ref('SHIP') // Tabs: 'SHIP' or 'PLANET'
+const mode = ref('SHIP') 
 
-// Accordion toggle state for UI sections
 const open = ref({
     shipCargo: true,
     shipPax: true,
@@ -42,83 +19,71 @@ const open = ref({
     planetShop: false
 })
 
-/**
- * Toggles the visibility of a specific accordion section.
- * @param key The key in the 'open' state object
- */
 const toggle = (key: keyof typeof open.value) => { 
     open.value[key] = !open.value[key] 
 }
 
 // --- HELPERS ---
 
-/**
- * Resolves a raw planet key (e.g., "p_1") to its display name.
- * Fallback: Returns the key if the planet object isn't found.
- */
 const getPlanetName = (key: string) => {
-    if (!props.planets) return key
-    const p = props.planets.find(x => x.key === key)
+    if (!store.universe) return key
+    const p = store.universe.find(x => x.key === key)
     return p ? p.name : key
 }
 
-/**
- * Comparator function for Contracts.
- * Sort Order:
- * 1. Destination Name (Alphabetical A-Z)
- * 2. Payout (Descending - Highest Value first)
- */
 const sortContracts = (a: any, b: any) => {
-    // Resolve names to ensure we sort by "Terra" not "planet_terra"
     const destA = getPlanetName(a.destination_key)
     const destB = getPlanetName(b.destination_key)
-
-    // 1. Primary Sort: Destination Name
     const nameCompare = destA.localeCompare(destB)
     if (nameCompare !== 0) return nameCompare
-    
-    // 2. Secondary Sort: Payout (High to Low)
-    // Note: 'payout' comes from Go struct 'Contract.Payout' (int)
     return (b.payout || 0) - (a.payout || 0)
 }
 
-// --- COMPUTED DATA (Sorted) ---
+// --- COMPUTED DATA ---
 
-// 1. SHIP: Cargo Hold
+// 1. SHIP: Cargo
 const shipCargo = computed(() => {
-    const list = props.ship?.active_contracts?.filter((c:any) => c.type === 'cargo') || []
+    const list = store.ship?.active_contracts?.filter((c:any) => c.type === 'cargo') || []
     return [...list].sort(sortContracts)
 })
+// New: Calculate total volume
+const cargoVolume = computed(() => shipCargo.value.reduce((sum, c) => sum + c.quantity, 0))
 
 // 2. SHIP: Passengers
 const shipPax = computed(() => {
-    const list = props.ship?.active_contracts?.filter((c:any) => c.type === 'passenger') || []
+    const list = store.ship?.active_contracts?.filter((c:any) => c.type === 'passenger') || []
     return [...list].sort(sortContracts)
 })
+// New: Calculate total pax
+const paxCount = computed(() => shipPax.value.reduce((sum, c) => sum + c.quantity, 0))
 
-// 3. SHIP: Installed Modules (No sort required)
-const shipMods = computed(() => props.ship?.installed_modules || [])
+// 3. SHIP: Modules
+const shipMods = computed(() => store.ship?.installed_modules || [])
 
-// 4. PLANET: Market (Exports) - NOW SORTED
+// 4. PLANET: Market
 const planetMarket = computed(() => {
-    const list = props.jobs?.filter((j:any) => j.type === 'cargo') || []
+    const list = store.availableJobs?.filter((j:any) => j.type === 'cargo') || []
     return [...list].sort(sortContracts)
 })
 
-// 5. PLANET: Jobs (Transport) - NOW SORTED
+// 5. PLANET: Jobs
 const planetJobs = computed(() => {
-    const list = props.jobs?.filter((j:any) => j.type === 'passenger') || []
+    const list = store.availableJobs?.filter((j:any) => j.type === 'passenger') || []
     return [...list].sort(sortContracts)
 })
 
-// 6. PLANET: Outfitting
-const planetShop = computed(() => props.modules || [])
+// 6. PLANET: Shop
+const planetShop = computed(() => store.availableModules || [])
 
 </script>
 
 <template>
   <div class="ops-panel">
     
+    <div v-if="store.uiState.lastError" class="global-error" @click="store.uiState.lastError = null">
+        ⚠ ERROR: {{ store.uiState.lastError }}
+    </div>
+
     <div class="tabs">
         <button :class="{ active: mode === 'SHIP' }" @click="mode = 'SHIP'">SHIP MANIFEST</button>
         <button :class="{ active: mode === 'PLANET' }" @click="mode = 'PLANET'">PLANET SERVICES</button>
@@ -129,7 +94,7 @@ const planetShop = computed(() => props.modules || [])
         <div v-if="mode === 'SHIP'">
             
             <div class="section-header" @click="toggle('shipCargo')">
-                <span>:: CARGO HOLD ({{ shipCargo.length }})</span>
+                <span>:: CARGO HOLD ({{ cargoVolume }} / {{ store.ship?.cargo_capacity }})</span>
                 <span>{{ open.shipCargo ? '[-]' : '[+]' }}</span>
             </div>
             <div v-if="open.shipCargo" class="list-group">
@@ -139,13 +104,13 @@ const planetShop = computed(() => props.modules || [])
                         <span class="meta-sub">Val: {{ item.payout }}cr</span>
                     </div>
                     <span class="dest">-> {{ getPlanetName(item.destination_key) }}</span>
-                    <button class="btn-xs warn" @click="emit('drop', item.id)">DUMP</button>
+                    <button class="btn-xs warn" @click="store.dropContract(item.id)">DUMP</button>
                 </div>
                 <div v-if="!shipCargo.length" class="empty">-- EMPTY --</div>
             </div>
 
             <div class="section-header" @click="toggle('shipPax')">
-                <span>:: CABINS ({{ shipPax.length }})</span>
+                <span>:: CABINS ({{ paxCount }} / {{ store.ship?.passenger_slots }})</span>
                 <span>{{ open.shipPax ? '[-]' : '[+]' }}</span>
             </div>
             <div v-if="open.shipPax" class="list-group">
@@ -155,7 +120,7 @@ const planetShop = computed(() => props.modules || [])
                         <span class="meta-sub">Fare: {{ pax.payout }}cr</span>
                     </div>
                     <span class="dest">-> {{ getPlanetName(pax.destination_key) }}</span>
-                    <button class="btn-xs warn" @click="emit('drop', pax.id)">EJECT</button>
+                    <button class="btn-xs warn" @click="store.dropContract(pax.id)">EJECT</button>
                 </div>
                 <div v-if="!shipPax.length" class="empty">-- EMPTY --</div>
             </div>
@@ -174,7 +139,6 @@ const planetShop = computed(() => props.modules || [])
         </div>
 
         <div v-if="mode === 'PLANET'">
-            
             <div class="section-header" @click="toggle('planetMarket')">
                 <span>:: LOCAL EXPORTS ({{ planetMarket.length }})</span>
                 <span>{{ open.planetMarket ? '[-]' : '[+]' }}</span>
@@ -186,7 +150,7 @@ const planetShop = computed(() => props.modules || [])
                     </div>
                     <span class="dest">-> {{ getPlanetName(job.destination_key) }}</span>
                     <span class="pay">{{ job.payout }}cr</span>
-                    <button class="btn-xs" @click="emit('accept', job.id)">TAKE</button>
+                    <button class="btn-xs" @click="store.acceptContract(job.id)">TAKE</button>
                 </div>
                 <div v-if="!planetMarket.length" class="empty">-- NO CONTRACTS --</div>
             </div>
@@ -202,7 +166,7 @@ const planetShop = computed(() => props.modules || [])
                     </div>
                     <span class="dest">-> {{ getPlanetName(job.destination_key) }}</span>
                     <span class="pay">{{ job.payout }}cr</span>
-                    <button class="btn-xs" @click="emit('accept', job.id)">BOARD</button>
+                    <button class="btn-xs" @click="store.acceptContract(job.id)">BOARD</button>
                 </div>
                 <div v-if="!planetJobs.length" class="empty">-- NO PASSENGERS --</div>
             </div>
@@ -216,7 +180,7 @@ const planetShop = computed(() => props.modules || [])
                     <div v-for="mod in planetShop" :key="mod.key" class="list-item">
                         <span class="name white">{{ mod.name }}</span>
                         <span class="pay">{{ mod.cost }}cr</span>
-                        <button class="btn-xs" :disabled="ship.credits < mod.cost" @click="emit('buy', mod.key)">BUY</button>
+                        <button class="btn-xs" :disabled="(store.ship?.credits || 0) < mod.cost" @click="store.buyModule(mod.key)">BUY</button>
                     </div>
                 </div>
             </div>
@@ -230,6 +194,18 @@ const planetShop = computed(() => props.modules || [])
 <style scoped>
 /* Main Container */
 .ops-panel { display: flex; flex-direction: column; height: 100%; font-family: 'Courier New', monospace; }
+
+/* Global Error */
+.global-error {
+    background: #440000;
+    color: #ff5555;
+    border-bottom: 1px solid #ff0000;
+    padding: 8px;
+    text-align: center;
+    font-size: 0.8rem;
+    cursor: pointer;
+    font-weight: bold;
+}
 
 /* Tabs */
 .tabs { display: flex; background: #001100; border-bottom: 1px solid #004400; flex-shrink: 0; }

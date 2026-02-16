@@ -15,7 +15,11 @@
       "ESNext",
       "DOM"
     ],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": [
+      "vite/client", 
+      "estree"
+    ]
   },
   "include": [
     "src/**/*.ts",

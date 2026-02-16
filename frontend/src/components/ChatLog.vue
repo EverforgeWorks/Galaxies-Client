@@ -1,16 +1,12 @@
 <script setup lang="ts">
 import { ref, onUpdated, nextTick } from 'vue'
+import { useGameStore } from '../stores/gameStore'
 
-const props = defineProps({
-  messages: Array as () => any[],
-  shipName: String
-})
-
-const emit = defineEmits(['sendMessage'])
+const store = useGameStore()
 const newMessage = ref('')
 const scrollContainer = ref<HTMLElement | null>(null)
 
-// Auto-scroll to bottom when new messages arrive
+// Auto-scroll logic watching the store
 onUpdated(() => {
     nextTick(() => {
         if (scrollContainer.value) {
@@ -21,7 +17,7 @@ onUpdated(() => {
 
 const send = () => {
     if (!newMessage.value.trim()) return
-    emit('sendMessage', newMessage.value)
+    store.sendChatMessage(newMessage.value)
     newMessage.value = ''
 }
 </script>
@@ -29,7 +25,7 @@ const send = () => {
 <template>
   <div class="chat-wrapper">
     <div class="message-list" ref="scrollContainer">
-      <div v-for="(msg, i) in messages" :key="i" class="chat-row">
+      <div v-for="(msg, i) in store.chatMessages" :key="i" class="chat-row">
         
         <template v-if="msg.type === 'system_alert'">
             <div class="sys-msg">
@@ -42,13 +38,13 @@ const send = () => {
         <template v-else>
             <div>
                 <span class="timestamp">[{{ msg.timestamp }}]</span>
-                <span class="sender" :class="{ 'is-me': msg.sender === shipName }">{{ msg.sender }}:</span>
+                <span class="sender" :class="{ 'is-me': msg.sender === store.ship?.name }">{{ msg.sender }}:</span>
                 <span class="text">{{ msg.payload }}</span>
             </div>
         </template>
 
       </div>
-      <div v-if="!messages?.length" class="empty-chat">-- NO SIGNALS DETECTED --</div>
+      <div v-if="!store.chatMessages.length" class="empty-chat">-- NO SIGNALS DETECTED --</div>
     </div>
 
     <div class="input-area">

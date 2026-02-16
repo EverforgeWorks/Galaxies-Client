@@ -1,87 +1,21 @@
 <script setup lang="ts">
-import { reactive, onMounted, ref } from 'vue'
-import { 
-  GetShipState, GetAvailableContracts, Travel, AcceptJob, 
-  DropJob, GetPlanets, Refuel, GetModules, BuyModule 
-} from '../wailsjs/go/main/App'
+import { onMounted } from 'vue'
+import { useGameStore } from './stores/gameStore' // Converted to use store
 
 import StarMap from './components/StarMap.vue'
 import ShipStatus from './components/ShipStatus.vue'
 import OperationsPanel from './components/OperationsPanel.vue'
 import ChatLog from './components/ChatLog.vue'
+import { ref } from 'vue'
 
-// --- STATE ---
-const state = reactive({
-  ship: {} as any,
-  jobs: [] as any[],
-  planets: [] as any[],
-  modules: [] as any[], 
-  chatMessages: [] as any[],
-  loading: false
-})
-
+const store = useGameStore()
 const chatCollapsed = ref(false)
 
-// --- WEBSOCKET & LOGIC (Kept same as before) ---
-let socket: WebSocket | null = null
-function connectWS() {
-    socket = new WebSocket("wss://api.playburnrate.com/ws")
-    socket.onmessage = (event) => {
-        try {
-            const msg = JSON.parse(event.data);
-            if (msg.type === "chat_global") pushMessage(msg);
-            if (msg.type === "market_pulse") handleMarketPulse(msg);
-        } catch (e) { console.error(e); }
-    }
-    socket.onclose = () => setTimeout(connectWS, 5000)
-}
-
-function pushMessage(msg: any) {
-    const msgWithTime = { ...msg, timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }
-    state.chatMessages = [...state.chatMessages, msgWithTime];
-    if (state.chatMessages.length > 50) state.chatMessages.shift();
-}
-
-function handleMarketPulse(msg: any) {
-    const updatedKeys = msg.updated_planets || [];
-    if (updatedKeys.includes(state.ship.location_key)) {
-        GetAvailableContracts().then(jobs => state.jobs = jobs);
-    }
-    const names = updatedKeys.map((key: string) => {
-        const p = state.planets.find(x => x.key === key);
-        return p ? p.name : key;
-    });
-    if (names.length > 0) {
-        pushMessage({ type: "system_alert", sender: "NET_UPLINK", payload: `MARKET REFRESH: ${names.join(', ')}` });
-    }
-}
-
-function handleSendMessage(text: string) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return
-    const msg = { type: "chat_global", sender: state.ship.name || 'PILOT', payload: text }
-    socket.send(JSON.stringify(msg))
-}
-
-async function refreshAll() {
-  state.loading = true
-  try {
-    state.ship = await GetShipState()
-    state.jobs = await GetAvailableContracts()
-    if (state.planets.length === 0) state.planets = await GetPlanets() || []
-    state.modules = await GetModules() || []
-  } catch (e) { console.error(e) } 
-  finally { state.loading = false }
-}
-
-const actions = {
-  travel: async (dest: string) => { state.ship = await Travel(dest); await refreshAll() },
-  accept: async (id: string) => { await AcceptJob(id); await refreshAll() },
-  drop: async (id: string) => { await DropJob(id); await refreshAll() },
-  refuel: async () => { await Refuel(); await refreshAll() },
-  buyModule: async (key: string) => { await BuyModule(key); await refreshAll() }
-}
-
-onMounted(() => { refreshAll(); connectWS() })
+// Bootstrapping
+onMounted(() => { 
+    store.refreshAll()
+    store.connectSocket()
+})
 </script>
 
 <template>
@@ -91,24 +25,11 @@ onMounted(() => { refreshAll(); connectWS() })
     <div class="col-left">
       
       <div class="section-status">
-        <ShipStatus 
-          :ship="state.ship" 
-          :planets="state.planets"
-          :loading="state.loading"
-          @refuel="actions.refuel" 
-        />
+        <ShipStatus />
       </div>
 
       <div class="section-ops">
-        <OperationsPanel 
-          :ship="state.ship"
-          :jobs="state.jobs"
-          :planets="state.planets"
-          :modules="state.modules"
-          @accept="actions.accept"
-          @drop="actions.drop"
-          @buy="actions.buyModule"
-        />
+        <OperationsPanel />
       </div>
 
       <div class="section-comms" :class="{ 'collapsed': chatCollapsed }">
@@ -117,23 +38,14 @@ onMounted(() => { refreshAll(); connectWS() })
           <span class="toggle-icon">{{ chatCollapsed ? '▲' : '▼' }}</span>
         </div>
         <div class="comms-content" v-show="!chatCollapsed">
-          <ChatLog 
-            :messages="state.chatMessages" 
-            :shipName="state.ship.name" 
-            @sendMessage="handleSendMessage"
-          />
+          <ChatLog />
         </div>
       </div>
 
     </div>
 
     <div class="col-right">
-      <StarMap 
-        :universe="state.planets"
-        :currentLocation="state.ship.location_key"
-        :ship="state.ship"
-        @travel="actions.travel"
-      />
+      <StarMap />
     </div>
 
   </div>
