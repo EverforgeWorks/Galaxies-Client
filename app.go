@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -20,35 +21,26 @@ func NewApp() *App {
 	return &App{}
 }
 
-// startup is called when the app starts. The context is saved
-// so we can call the runtime methods
+// startup is called when the app starts.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// 1. Load the Universe (Now from local file in the client root)
+	// Load the Universe configuration
 	if err := game.LoadConfig(); err != nil {
 		log.Printf("CRITICAL: Failed to load universe config: %v", err)
 	}
 
-	// 2. Initial Market Seed
-	game.ReplenishMarket()
-
-	// 3. Start the Economy Heartbeat (Background Simulation)
-	// This replaces the server's main.go loop
+	// Start the Economy Heartbeat
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		for {
 			select {
 			case <-a.ctx.Done():
-				return // Stop when app closes
+				return
 			case <-ticker.C:
-				// Run logic
 				updatedPlanets := game.ReplenishMarket()
-
 				if len(updatedPlanets) > 0 {
-					// Emit event to Frontend (Replaces Websocket Broadcast)
 					runtime.EventsEmit(a.ctx, "market_pulse", updatedPlanets)
-					log.Printf("SIMULATION: Updated %d planets", len(updatedPlanets))
 				}
 			}
 		}
@@ -56,18 +48,67 @@ func (a *App) startup(ctx context.Context) {
 }
 
 // -----------------------------------------------------------------------------
+// PERSISTENCE & SESSION METHODS
+// -----------------------------------------------------------------------------
+
+// NewGameParams defines the data needed to start a fresh journey
+type NewGameParams struct {
+	Slot        int    `json:"slot"`
+	PlayerName  string `json:"player_name"`
+	ShipName    string `json:"ship_name"`
+	ShipTypeKey string `json:"ship_type_key"`
+}
+
+// CreateNewGame initializes a new player and ship based on onboarding choices
+func (a *App) CreateNewGame(params NewGameParams) string {
+	// Initialize the market for a fresh start
+	game.ReplenishMarket()
+
+	// Logic to initialize game.CurrentPlayer and game.CurrentPlayer.ActiveShip
+	// based on params. This assumes internal/game has an Init function.
+	err := game.InitializeNewPlayer(params.PlayerName, params.ShipName, params.ShipTypeKey)
+	if err != nil {
+		return "CREATION FAILED: " + err.Error()
+	}
+
+	// Save immediately to the chosen slot
+	return a.SaveGame(params.Slot)
+}
+
+// SaveGame triggers a save to a specific slot file
+func (a *App) SaveGame(slot int) string {
+	filename := fmt.Sprintf("save_slot_%d.yaml", slot)
+	err := game.SaveGame(filename)
+	if err != nil {
+		return "SAVE FAILED: " + err.Error()
+	}
+	return "GAME SAVED"
+}
+
+// LoadGame triggers a load from a specific slot file
+func (a *App) LoadGame(slot int) string {
+	filename := fmt.Sprintf("save_slot_%d.yaml", slot)
+	err := game.LoadGame(filename)
+	if err != nil {
+		return "LOAD FAILED: " + err.Error()
+	}
+
+	// Initial Market Seed for the loaded session
+	game.ReplenishMarket()
+
+	runtime.EventsEmit(a.ctx, "market_pulse", []string{"LOADED"})
+	return "GAME LOADED"
+}
+
+// -----------------------------------------------------------------------------
 // HELPER METHODS
 // -----------------------------------------------------------------------------
 
-// getActiveShip retrieves the pointer to the ship currently being flown by the player.
-// Assumes the caller holds the DataLock.
 func getActiveShip() *game.Ship {
 	key := game.CurrentPlayer.ActiveShipKey
 	return game.CurrentPlayer.Ships[key]
 }
 
-// enrichShipData calculates dynamic physics properties (Mass/Burn) for the ship
-// before sending it to the UI.
 func (a *App) enrichShipData(s *game.Ship) *game.Ship {
 	s.TotalMass = game.CalculateTotalMass(s)
 	s.CurrentBurn = game.CalculateCurrentBurn(s)
@@ -78,14 +119,12 @@ func (a *App) enrichShipData(s *game.Ship) *game.Ship {
 // SHIP & NAVIGATION METHODS
 // -----------------------------------------------------------------------------
 
-// PlayerStateResponse combines Player info with the Active Ship info.
 type PlayerStateResponse struct {
 	PlayerName string     `json:"player_name"`
 	Credits    int        `json:"credits"`
 	Ship       *game.Ship `json:"ship"`
 }
 
-// GetShipState returns the Player + Active Ship status.
 func (a *App) GetShipState() PlayerStateResponse {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
@@ -99,23 +138,12 @@ func (a *App) GetShipState() PlayerStateResponse {
 	}
 }
 
-// GetPlanets returns the static universe map.
 func (a *App) GetPlanets() []game.Planet {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
 	return game.CurrentUniverse.Planets
 }
 
-// TravelResponse is the struct returned to the UI after a travel action.
-type TravelResponse struct {
-	Success  bool                `json:"success"`
-	State    PlayerStateResponse `json:"state"` // Returns full state update
-	Events   []game.TravelEvent  `json:"events"`
-	Duration int64               `json:"duration_seconds"`
-	Error    string              `json:"error,omitempty"`
-}
-
-// Travel executes a move to another planet using the Active Ship.
 func (a *App) Travel(destinationKey string) TravelResponse {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
@@ -128,7 +156,6 @@ func (a *App) Travel(destinationKey string) TravelResponse {
 		return TravelResponse{Success: false, Error: "Invalid Destination"}
 	}
 
-	// Physics on specific ship instance
 	dist := game.CalculateDistance(curr.Coordinates, dest.Coordinates)
 	burn := game.CalculateCurrentBurn(ship)
 	cost := dist * burn
@@ -137,14 +164,11 @@ func (a *App) Travel(destinationKey string) TravelResponse {
 		return TravelResponse{Success: false, Error: "Insufficient Fuel"}
 	}
 
-	// Execute Move
 	ship.Fuel -= cost
 	ship.LocationKey = dest.Key
 
-	// Events
 	events := game.ProcessArrivalEvents(ship)
 
-	// Deliveries
 	payout := 0
 	remaining := []game.Contract{}
 	for _, c := range ship.ActiveContracts {
@@ -156,7 +180,7 @@ func (a *App) Travel(destinationKey string) TravelResponse {
 		}
 	}
 	ship.ActiveContracts = remaining
-	game.CurrentPlayer.Credits += payout // Credits go to Player Wallet
+	game.CurrentPlayer.Credits += payout
 
 	return TravelResponse{
 		Success: true,
@@ -166,7 +190,7 @@ func (a *App) Travel(destinationKey string) TravelResponse {
 			Ship:       a.enrichShipData(ship),
 		},
 		Events:   events,
-		Duration: dist, // 1 Second per LY
+		Duration: dist,
 	}
 }
 
@@ -178,7 +202,6 @@ type TravelQuoteResponse struct {
 	EstimatedDuration int64 `json:"estimated_duration_seconds"`
 }
 
-// GetTravelQuote calculates cost without moving.
 func (a *App) GetTravelQuote(destinationKey string) TravelQuoteResponse {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
@@ -204,7 +227,6 @@ func (a *App) GetTravelQuote(destinationKey string) TravelQuoteResponse {
 	}
 }
 
-// Refuel fills the tank of the Active Ship using Player Credits.
 func (a *App) Refuel() bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
@@ -229,7 +251,6 @@ func (a *App) Refuel() bool {
 // ECONOMY & CONTRACT METHODS
 // -----------------------------------------------------------------------------
 
-// GetAvailableContracts returns jobs at the current location of the Active Ship.
 func (a *App) GetAvailableContracts() []game.Contract {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
@@ -238,7 +259,6 @@ func (a *App) GetAvailableContracts() []game.Contract {
 	return game.AvailableContracts[ship.LocationKey]
 }
 
-// AcceptJob moves a contract from planet to the Active Ship.
 func (a *App) AcceptJob(contractID string) bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
@@ -247,7 +267,6 @@ func (a *App) AcceptJob(contractID string) bool {
 	loc := ship.LocationKey
 	board := game.AvailableContracts[loc]
 
-	// Find contract
 	idx := -1
 	var target game.Contract
 	for i, c := range board {
@@ -262,7 +281,6 @@ func (a *App) AcceptJob(contractID string) bool {
 		return false
 	}
 
-	// Validate Capacity
 	currentCargo, currentPax := 0, 0
 	for _, c := range ship.ActiveContracts {
 		if c.Type == "cargo" {
@@ -279,17 +297,14 @@ func (a *App) AcceptJob(contractID string) bool {
 		return false
 	}
 
-	// Move Contract
 	ship.ActiveContracts = append(ship.ActiveContracts, target)
 	game.AvailableContracts[loc] = append(board[:idx], board[idx+1:]...)
 
-	// Economy Impact
 	game.Market.RecordAcceptance(target.OriginKey, target.ItemKey, target.Quantity)
 
 	return true
 }
 
-// DropJob abandons a contract from the Active Ship.
 func (a *App) DropJob(contractID string) bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
@@ -319,7 +334,6 @@ func (a *App) DropJob(contractID string) bool {
 // MODULE & UPGRADE METHODS
 // -----------------------------------------------------------------------------
 
-// GetModules returns upgrades (Only at Prime).
 func (a *App) GetModules() []game.ShipModule {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
@@ -331,7 +345,6 @@ func (a *App) GetModules() []game.ShipModule {
 	return game.CurrentUniverse.ShipModules
 }
 
-// BuyModule purchases an upgrade for the Active Ship.
 func (a *App) BuyModule(key string) bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
@@ -353,7 +366,6 @@ func (a *App) BuyModule(key string) bool {
 	game.CurrentPlayer.Credits -= mod.Cost
 	ship.InstalledModules = append(ship.InstalledModules, *mod)
 
-	// Apply Stats to SHIP
 	switch mod.StatModifier {
 	case "cargo_capacity":
 		ship.CargoCapacity += mod.StatValue
@@ -366,30 +378,4 @@ func (a *App) BuyModule(key string) bool {
 	}
 
 	return true
-}
-
-// -----------------------------------------------------------------------------
-// PERSISTENCE METHODS
-// -----------------------------------------------------------------------------
-
-// SaveGame triggers a save to 'savegame.yaml' in the game directory.
-func (a *App) SaveGame() string {
-	err := game.SaveGame("savegame.yaml")
-	if err != nil {
-		return "SAVE FAILED: " + err.Error()
-	}
-	return "GAME SAVED"
-}
-
-// LoadGame triggers a load from 'savegame.yaml'.
-func (a *App) LoadGame() string {
-	err := game.LoadGame("savegame.yaml")
-	if err != nil {
-		return "LOAD FAILED: " + err.Error()
-	}
-
-	// Force a UI refresh event immediately after loading
-	runtime.EventsEmit(a.ctx, "market_pulse", []string{"LOADED"})
-
-	return "GAME LOADED"
 }

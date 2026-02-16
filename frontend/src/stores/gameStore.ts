@@ -1,25 +1,24 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Ship, GameState, Contract, Planet, ShipModule, TravelEvent, TravelResponse } from '../types';
+import type { Ship, GameState, Contract, Planet, ShipModule, TravelEvent } from '../types';
 import { 
   GetShipState, GetPlanets, GetAvailableContracts, GetModules, 
-  Travel, AcceptJob, DropJob, Refuel, BuyModule 
+  Travel, AcceptJob, DropJob, Refuel, BuyModule, LoadGame, CreateNewGame
 } from '../../wailsjs/go/main/App';
 import { EventsOn } from '../../wailsjs/runtime/runtime';
 
-// CONFIGURATION CONSTANTS (Must match universe.yaml)
 const FUEL_MASS_PER_UNIT = 3;
 
 export const useGameStore = defineStore('game', () => {
     // --- STATE ---
     const ship = ref<Ship | null>(null);
     const universe = ref<Planet[]>([]);
-    
     const availableJobs = ref<Contract[]>([]);
     const availableModules = ref<ShipModule[]>([]);
-    const chatMessages = ref<any[]>([]);
-
     const arrivalEvents = ref<TravelEvent[]>([]);
+
+    const activeSlot = ref<number | null>(null);
+    const currentView = ref<'menu' | 'onboarding' | 'game'>('menu');
 
     const uiState = ref<GameState>({
         isDocked: false,
@@ -28,45 +27,55 @@ export const useGameStore = defineStore('game', () => {
         showEvents: false
     });
 
-    // --- GETTERS (Computed) ---
-    
-    // Calculates total physics mass: Base + Fuel + Cargo/Pax
+    // --- GETTERS ---
     const totalMass = computed(() => {
         if (!ship.value) return 0;
-        
         let mass = ship.value.base_mass;
-
-        // 1. Add Fuel Mass
         mass += (ship.value.fuel * FUEL_MASS_PER_UNIT);
-
-        // 2. Add Contract Mass (Cargo & Passengers)
         if (ship.value.active_contracts) {
-            const contractMass = ship.value.active_contracts.reduce((sum, c) => {
-                return sum + (c.quantity * c.mass_per_unit);
-            }, 0);
-            mass += contractMass;
+            mass += ship.value.active_contracts.reduce((sum, c) => sum + (c.quantity * c.mass_per_unit), 0);
         }
-
         return mass;
     });
 
-    // --- HELPER ---
-    async function performAction(actionName: string, actionFn: () => Promise<any>): Promise<boolean> {
+    // --- ACTIONS ---
+
+    async function startNewSession(slot: number, playerName: string, shipName: string, shipType: string) {
         uiState.value.isLoading = true;
-        uiState.value.lastError = null;
         try {
-            await actionFn();
-            return true;
+            const res = await CreateNewGame({
+                slot,
+                player_name: playerName,
+                ship_name: shipName,
+                ship_type_key: shipType
+            });
+            if (res.startsWith("CREATION FAILED")) throw new Error(res);
+            
+            activeSlot.value = slot;
+            await refreshAll();
+            currentView.value = 'game';
         } catch (e: any) {
-            console.error(`${actionName} failed:`, e);
-            uiState.value.lastError = `${actionName} FAILED: ${e}`;
-            return false;
+            uiState.value.lastError = e.message;
         } finally {
             uiState.value.isLoading = false;
         }
     }
 
-    // --- ACTIONS ---
+    async function loadSession(slot: number) {
+        uiState.value.isLoading = true;
+        try {
+            const res = await LoadGame(slot);
+            if (res.startsWith("LOAD FAILED")) throw new Error(res);
+            
+            activeSlot.value = slot;
+            await refreshAll();
+            currentView.value = 'game';
+        } catch (e: any) {
+            uiState.value.lastError = e.message;
+        } finally {
+            uiState.value.isLoading = false;
+        }
+    }
 
     async function refreshAll() {
         try {
@@ -85,87 +94,36 @@ export const useGameStore = defineStore('game', () => {
     }
 
     function initGameEvents() {
-        console.log("HOOKING INTO SHIP SYSTEMS...");
         EventsOn("market_pulse", (updatedPlanets: string[]) => {
-            console.log("MARKET UPDATE:", updatedPlanets);
-            if (!uiState.value.isLoading) refreshAll();
+            if (!uiState.value.isLoading && currentView.value === 'game') refreshAll();
         });
-        refreshAll();
     }
 
     async function travel(destination: string): Promise<{ success: boolean, duration: number }> {
-        let duration = 0;
         uiState.value.isLoading = true;
-        uiState.value.lastError = null;
-
         try {
             const response = await Travel(destination);
-            
             if (response.success) {
                 ship.value = response.ship as Ship;
                 arrivalEvents.value = response.events;
-                duration = response.duration_seconds;
-                return { success: true, duration };
+                return { success: true, duration: response.duration_seconds };
             } else {
                 uiState.value.lastError = response.error || null;
-                uiState.value.isLoading = false;
                 return { success: false, duration: 0 };
             }
         } catch (e) {
             uiState.value.lastError = "NAVIGATION SYSTEM FAILURE";
-            uiState.value.isLoading = false;
             return { success: false, duration: 0 };
+        } finally {
+            uiState.value.isLoading = false;
         }
-    }
-
-    function revealEvents() {
-        if (arrivalEvents.value.length > 0) {
-            uiState.value.showEvents = true;
-        }
-        uiState.value.isLoading = false;
-    }
-
-    function clearEvents() {
-        uiState.value.showEvents = false;
-        arrivalEvents.value = [];
-    }
-
-    async function acceptContract(id: string) {
-        const success = await performAction("Accept Contract", async () => {
-             const res = await AcceptJob(id);
-             if (!res) throw new Error("Contract unavailable or ship full");
-        });
-        if (success) await refreshAll();
-    }
-
-    async function dropContract(id: string) {
-        const success = await performAction("Drop Contract", async () => {
-             const res = await DropJob(id);
-             if (!res) throw new Error("Contract not found");
-        });
-        if (success) await refreshAll();
-    }
-
-    async function refuelShip() {
-        const success = await performAction("Refuel", async () => {
-             const res = await Refuel();
-             if (!res) throw new Error("Insufficient credits or full tank");
-        });
-        if (success) await refreshAll();
-    }
-
-    async function buyModule(key: string) {
-        const success = await performAction("Buy Module", async () => {
-             const res = await BuyModule(key);
-             if (!res) throw new Error("Purchase failed");
-        });
-        if (success) await refreshAll();
     }
 
     return {
-        ship, universe, availableJobs, availableModules, chatMessages, uiState, arrivalEvents,
-        totalMass, // Exported Getter
-        refreshAll, initGameEvents, travel, acceptContract, dropContract, refuelShip, buyModule,
-        revealEvents, clearEvents
+        ship, universe, availableJobs, availableModules, uiState, arrivalEvents,
+        activeSlot, currentView, totalMass,
+        refreshAll, initGameEvents, travel, startNewSession, loadSession,
+        revealEvents: () => { uiState.value.showEvents = true; },
+        clearEvents: () => { uiState.value.showEvents = false; arrivalEvents.value = []; }
     };
 });
