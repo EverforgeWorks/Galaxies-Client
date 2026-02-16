@@ -48,10 +48,14 @@ export interface Ship {
     cargo_capacity: number;
     passenger_slots: number;
     max_module_slots: number;
+    
     installed_modules: ShipModule[];
     active_contracts: Contract[];
-}
 
+    // NEW: Computed properties from Backend
+    total_mass: number;
+    current_burn: number;
+}
 export interface Planet {
     key: string;
     name: string;

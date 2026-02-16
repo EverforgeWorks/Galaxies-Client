@@ -41,12 +41,22 @@ const flightPlan = computed(() => {
     const p1 = currentPlanetObj.value.coordinates || [0,0]
     const p2 = selectedStar.value.coordinates || [0,0]
     
-    // Client-side estimation (Server has final say)
-    const dist = Math.sqrt(Math.pow(p2[0]-p1[0], 2) + Math.pow(p2[1]-p1[1], 2))
-    const cost = Math.ceil(dist * (store.ship.base_burn_rate || 1.0))
+    // 1. Calculate Distance (Float)
+    const rawDist = Math.sqrt(Math.pow(p2[0]-p1[0], 2) + Math.pow(p2[1]-p1[1], 2))
+    
+    // 2. Round to Integer (Matches Go 'math.Round' behavior in mechanics.go)
+    // This ensures client math matches server math exactly.
+    const distInt = Math.round(rawDist)
+
+    // 3. Get Dynamic Burn Rate
+    // Uses current_burn (calculated by backend based on mass) instead of static base_burn_rate.
+    const burnRate = store.ship.current_burn || store.ship.base_burn_rate || 1.0
+
+    // 4. Calculate Total Cost
+    const cost = distInt * burnRate
     
     return { 
-        distance: dist.toFixed(1), 
+        distance: distInt.toFixed(0), // Display as Integer
         cost: cost, 
         canAfford: store.ship.fuel >= cost 
     }

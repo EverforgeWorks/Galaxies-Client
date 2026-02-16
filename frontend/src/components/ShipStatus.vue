@@ -34,15 +34,15 @@ async function handleRefuel() {
         </div>
         <div class="stat-cell">
             <span class="label">MASS</span>
-            <span class="value">{{ store.ship?.base_mass }}kg</span>
+            <span class="value">{{ store.totalMass.toLocaleString() }}kg</span>
         </div>
         <div class="stat-cell">
-             <span class="label">FUEL ({{ (store.ship?.fuel || 0) / 100 }}%)</span>
+             <span class="label">FUEL ({{ store.ship?.fuel }} / {{ store.ship?.max_fuel }})</span>
              <button class="btn-refuel" 
                 :disabled="fuelPct > 99 || store.uiState.isLoading" 
                 @click="handleRefuel"
              >
-                {{ fuelPct > 99 ? 'FULL' : `FILL -${fuelCost}` }}
+                {{ fuelPct > 99 ? 'FULL' : `FILL -${fuelCost}cr` }}
              </button>
         </div>
     </div>

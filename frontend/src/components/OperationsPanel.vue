@@ -16,7 +16,6 @@ function getPlanetName(key: string): string {
 }
 
 // --- HELPER: Sorter ---
-// Sorts by Destination Name (A-Z), then Payout (High-to-Low)
 function contractSorter(a: Contract, b: Contract) {
     const nameA = getPlanetName(a.destination_key)
     const nameB = getPlanetName(b.destination_key)
@@ -33,6 +32,11 @@ function contractSorter(a: Contract, b: Contract) {
 const onboardCargo = computed(() => 
     (store.ship?.active_contracts.filter(c => c.type === 'cargo') || []).sort(contractSorter)
 )
+// FIX: Sum the quantity of all cargo contracts to get total usage
+const cargoVolume = computed(() => 
+    onboardCargo.value.reduce((sum, c) => sum + c.quantity, 0)
+)
+
 const marketCargo = computed(() => 
     (store.availableJobs.filter(c => c.type === 'cargo') || []).sort(contractSorter)
 )
@@ -41,6 +45,11 @@ const marketCargo = computed(() =>
 const onboardPassengers = computed(() => 
     (store.ship?.active_contracts.filter(c => c.type === 'passenger') || []).sort(contractSorter)
 )
+// FIX: Sum passenger counts (safeguard for future multi-pax contracts)
+const paxCount = computed(() => 
+    onboardPassengers.value.reduce((sum, c) => sum + c.quantity, 0)
+)
+
 const marketPassengers = computed(() => 
     (store.availableJobs.filter(c => c.type === 'passenger') || []).sort(contractSorter)
 )
@@ -85,7 +94,7 @@ function handleBuyModule(key: string) {
       <div v-if="activeTab === 'cargo'" class="tab-pane">
         
         <div class="section-block">
-            <div class="section-title">:: CARGO MANIFEST ({{ onboardCargo.length }} / {{ store.ship?.cargo_capacity }}) ::</div>
+            <div class="section-title">:: CARGO MANIFEST ({{ cargoVolume }} / {{ store.ship?.cargo_capacity }}) ::</div>
             <div v-if="onboardCargo.length === 0" class="empty-msg">HOLD EMPTY</div>
             
             <div v-for="c in onboardCargo" :key="c.id" class="compact-row onboard">
@@ -120,7 +129,7 @@ function handleBuyModule(key: string) {
       <div v-if="activeTab === 'passengers'" class="tab-pane">
         
         <div class="section-block">
-            <div class="section-title">:: PAX MANIFEST ({{ onboardPassengers.length }} / {{ store.ship?.passenger_slots }}) ::</div>
+            <div class="section-title">:: PAX MANIFEST ({{ paxCount }} / {{ store.ship?.passenger_slots }}) ::</div>
             <div v-if="onboardPassengers.length === 0" class="empty-msg">CABINS EMPTY</div>
 
             <div v-for="c in onboardPassengers" :key="c.id" class="compact-row onboard">

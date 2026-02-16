@@ -56,64 +56,98 @@ func (a *App) startup(ctx context.Context) {
 }
 
 // -----------------------------------------------------------------------------
+// HELPER METHODS
+// -----------------------------------------------------------------------------
+
+// getActiveShip retrieves the pointer to the ship currently being flown by the player.
+// Assumes the caller holds the DataLock.
+func getActiveShip() *game.Ship {
+	key := game.CurrentPlayer.ActiveShipKey
+	return game.CurrentPlayer.Ships[key]
+}
+
+// enrichShipData calculates dynamic physics properties (Mass/Burn) for the ship
+// before sending it to the UI.
+func (a *App) enrichShipData(s *game.Ship) *game.Ship {
+	s.TotalMass = game.CalculateTotalMass(s)
+	s.CurrentBurn = game.CalculateCurrentBurn(s)
+	return s
+}
+
+// -----------------------------------------------------------------------------
 // SHIP & NAVIGATION METHODS
 // -----------------------------------------------------------------------------
 
-// GetShipState returns the player's current status
-func (a *App) GetShipState() game.Ship {
-	game.DataLock.RLock()
-	defer game.DataLock.RUnlock()
-	return game.PlayerShip
+// PlayerStateResponse combines Player info with the Active Ship info.
+type PlayerStateResponse struct {
+	PlayerName string     `json:"player_name"`
+	Credits    int        `json:"credits"`
+	Ship       *game.Ship `json:"ship"`
 }
 
-// GetPlanets returns the static universe map
+// GetShipState returns the Player + Active Ship status.
+func (a *App) GetShipState() PlayerStateResponse {
+	game.DataLock.RLock()
+	defer game.DataLock.RUnlock()
+
+	ship := getActiveShip()
+
+	return PlayerStateResponse{
+		PlayerName: game.CurrentPlayer.Name,
+		Credits:    game.CurrentPlayer.Credits,
+		Ship:       a.enrichShipData(ship),
+	}
+}
+
+// GetPlanets returns the static universe map.
 func (a *App) GetPlanets() []game.Planet {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
 	return game.CurrentUniverse.Planets
 }
 
-// TravelResponse is the struct returned to the UI after a travel action
+// TravelResponse is the struct returned to the UI after a travel action.
 type TravelResponse struct {
-	Success  bool               `json:"success"`
-	Ship     game.Ship          `json:"ship"`
-	Events   []game.TravelEvent `json:"events"`
-	Duration int64              `json:"duration_seconds"`
-	Error    string             `json:"error,omitempty"`
+	Success  bool                `json:"success"`
+	State    PlayerStateResponse `json:"state"` // Returns full state update
+	Events   []game.TravelEvent  `json:"events"`
+	Duration int64               `json:"duration_seconds"`
+	Error    string              `json:"error,omitempty"`
 }
 
-// Travel executes a move to another planet
+// Travel executes a move to another planet using the Active Ship.
 func (a *App) Travel(destinationKey string) TravelResponse {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
 
+	ship := getActiveShip()
 	dest := game.GetPlanet(destinationKey)
-	curr := game.GetPlanet(game.PlayerShip.LocationKey)
+	curr := game.GetPlanet(ship.LocationKey)
 
 	if dest == nil {
 		return TravelResponse{Success: false, Error: "Invalid Destination"}
 	}
 
-	// Physics
+	// Physics on specific ship instance
 	dist := game.CalculateDistance(curr.Coordinates, dest.Coordinates)
-	burn := game.CalculateCurrentBurn()
+	burn := game.CalculateCurrentBurn(ship)
 	cost := dist * burn
 
-	if game.PlayerShip.Fuel < cost {
+	if ship.Fuel < cost {
 		return TravelResponse{Success: false, Error: "Insufficient Fuel"}
 	}
 
 	// Execute Move
-	game.PlayerShip.Fuel -= cost
-	game.PlayerShip.LocationKey = dest.Key
+	ship.Fuel -= cost
+	ship.LocationKey = dest.Key
 
 	// Events
-	events := game.ProcessArrivalEvents(&game.PlayerShip)
+	events := game.ProcessArrivalEvents(ship)
 
 	// Deliveries
 	payout := 0
 	remaining := []game.Contract{}
-	for _, c := range game.PlayerShip.ActiveContracts {
+	for _, c := range ship.ActiveContracts {
 		if c.DestinationKey == dest.Key {
 			payout += c.Payout
 			game.Market.RecordDelivery(c.DestinationKey, c.ItemKey, c.Quantity)
@@ -121,12 +155,16 @@ func (a *App) Travel(destinationKey string) TravelResponse {
 			remaining = append(remaining, c)
 		}
 	}
-	game.PlayerShip.ActiveContracts = remaining
-	game.PlayerShip.Credits += payout
+	ship.ActiveContracts = remaining
+	game.CurrentPlayer.Credits += payout // Credits go to Player Wallet
 
 	return TravelResponse{
-		Success:  true,
-		Ship:     game.PlayerShip,
+		Success: true,
+		State: PlayerStateResponse{
+			PlayerName: game.CurrentPlayer.Name,
+			Credits:    game.CurrentPlayer.Credits,
+			Ship:       a.enrichShipData(ship),
+		},
 		Events:   events,
 		Duration: dist, // 1 Second per LY
 	}
@@ -140,48 +178,50 @@ type TravelQuoteResponse struct {
 	EstimatedDuration int64 `json:"estimated_duration_seconds"`
 }
 
-// GetTravelQuote calculates cost without moving
+// GetTravelQuote calculates cost without moving.
 func (a *App) GetTravelQuote(destinationKey string) TravelQuoteResponse {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
 
+	ship := getActiveShip()
 	dest := game.GetPlanet(destinationKey)
-	curr := game.GetPlanet(game.PlayerShip.LocationKey)
+	curr := game.GetPlanet(ship.LocationKey)
 
 	if dest == nil {
 		return TravelQuoteResponse{}
 	}
 
 	dist := game.CalculateDistance(curr.Coordinates, dest.Coordinates)
-	burn := game.CalculateCurrentBurn()
+	burn := game.CalculateCurrentBurn(ship)
 	cost := dist * burn
 
 	return TravelQuoteResponse{
 		Distance:          dist,
 		FuelCost:          cost,
-		CanAfford:         game.PlayerShip.Fuel >= cost,
+		CanAfford:         ship.Fuel >= cost,
 		BurnRate:          burn,
 		EstimatedDuration: dist,
 	}
 }
 
-// Refuel fills the tank
+// Refuel fills the tank of the Active Ship using Player Credits.
 func (a *App) Refuel() bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
 
-	needed := game.PlayerShip.MaxFuel - game.PlayerShip.Fuel
+	ship := getActiveShip()
+	needed := ship.MaxFuel - ship.Fuel
 	if needed <= 0 {
 		return false
 	}
 
 	cost := (int(needed) / 100) * game.CurrentUniverse.BalanceConfig.FuelCostPerUnit
-	if game.PlayerShip.Credits < cost {
+	if game.CurrentPlayer.Credits < cost {
 		return false
 	}
 
-	game.PlayerShip.Credits -= cost
-	game.PlayerShip.Fuel = game.PlayerShip.MaxFuel
+	game.CurrentPlayer.Credits -= cost
+	ship.Fuel = ship.MaxFuel
 	return true
 }
 
@@ -189,21 +229,22 @@ func (a *App) Refuel() bool {
 // ECONOMY & CONTRACT METHODS
 // -----------------------------------------------------------------------------
 
-// GetAvailableContracts returns jobs at the current location
+// GetAvailableContracts returns jobs at the current location of the Active Ship.
 func (a *App) GetAvailableContracts() []game.Contract {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
 
-	loc := game.PlayerShip.LocationKey
-	return game.AvailableContracts[loc]
+	ship := getActiveShip()
+	return game.AvailableContracts[ship.LocationKey]
 }
 
-// AcceptJob moves a contract from planet to ship
+// AcceptJob moves a contract from planet to the Active Ship.
 func (a *App) AcceptJob(contractID string) bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
 
-	loc := game.PlayerShip.LocationKey
+	ship := getActiveShip()
+	loc := ship.LocationKey
 	board := game.AvailableContracts[loc]
 
 	// Find contract
@@ -223,7 +264,7 @@ func (a *App) AcceptJob(contractID string) bool {
 
 	// Validate Capacity
 	currentCargo, currentPax := 0, 0
-	for _, c := range game.PlayerShip.ActiveContracts {
+	for _, c := range ship.ActiveContracts {
 		if c.Type == "cargo" {
 			currentCargo += c.Quantity
 		} else {
@@ -231,15 +272,15 @@ func (a *App) AcceptJob(contractID string) bool {
 		}
 	}
 
-	if target.Type == "cargo" && currentCargo+target.Quantity > game.PlayerShip.CargoCapacity {
+	if target.Type == "cargo" && currentCargo+target.Quantity > ship.CargoCapacity {
 		return false
 	}
-	if target.Type == "passenger" && currentPax+target.Quantity > game.PlayerShip.PassengerSlots {
+	if target.Type == "passenger" && currentPax+target.Quantity > ship.PassengerSlots {
 		return false
 	}
 
 	// Move Contract
-	game.PlayerShip.ActiveContracts = append(game.PlayerShip.ActiveContracts, target)
+	ship.ActiveContracts = append(ship.ActiveContracts, target)
 	game.AvailableContracts[loc] = append(board[:idx], board[idx+1:]...)
 
 	// Economy Impact
@@ -248,13 +289,15 @@ func (a *App) AcceptJob(contractID string) bool {
 	return true
 }
 
-// DropJob abandons a contract
+// DropJob abandons a contract from the Active Ship.
 func (a *App) DropJob(contractID string) bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
 
+	ship := getActiveShip()
+
 	idx := -1
-	for i, c := range game.PlayerShip.ActiveContracts {
+	for i, c := range ship.ActiveContracts {
 		if c.ID == contractID {
 			idx = i
 			break
@@ -265,9 +308,9 @@ func (a *App) DropJob(contractID string) bool {
 		return false
 	}
 
-	game.PlayerShip.ActiveContracts = append(
-		game.PlayerShip.ActiveContracts[:idx],
-		game.PlayerShip.ActiveContracts[idx+1:]...,
+	ship.ActiveContracts = append(
+		ship.ActiveContracts[:idx],
+		ship.ActiveContracts[idx+1:]...,
 	)
 	return true
 }
@@ -276,51 +319,77 @@ func (a *App) DropJob(contractID string) bool {
 // MODULE & UPGRADE METHODS
 // -----------------------------------------------------------------------------
 
-// GetModules returns upgrades (Only at Prime)
+// GetModules returns upgrades (Only at Prime).
 func (a *App) GetModules() []game.ShipModule {
 	game.DataLock.RLock()
 	defer game.DataLock.RUnlock()
 
-	if game.PlayerShip.LocationKey != "planet_prime" {
+	ship := getActiveShip()
+	if ship.LocationKey != "planet_prime" {
 		return []game.ShipModule{}
 	}
 	return game.CurrentUniverse.ShipModules
 }
 
-// BuyModule purchases an upgrade
+// BuyModule purchases an upgrade for the Active Ship.
 func (a *App) BuyModule(key string) bool {
 	game.DataLock.Lock()
 	defer game.DataLock.Unlock()
 
-	if game.PlayerShip.LocationKey != "planet_prime" {
+	ship := getActiveShip()
+
+	if ship.LocationKey != "planet_prime" {
 		return false
 	}
-
-	// Check Slots
-	if len(game.PlayerShip.InstalledModules) >= game.PlayerShip.MaxModuleSlots {
+	if len(ship.InstalledModules) >= ship.MaxModuleSlots {
 		return false
 	}
 
 	mod := game.GetModule(key)
-	if mod == nil || game.PlayerShip.Credits < mod.Cost {
+	if mod == nil || game.CurrentPlayer.Credits < mod.Cost {
 		return false
 	}
 
-	// Apply
-	game.PlayerShip.Credits -= mod.Cost
-	game.PlayerShip.InstalledModules = append(game.PlayerShip.InstalledModules, *mod)
+	game.CurrentPlayer.Credits -= mod.Cost
+	ship.InstalledModules = append(ship.InstalledModules, *mod)
 
-	// Update Stats
+	// Apply Stats to SHIP
 	switch mod.StatModifier {
 	case "cargo_capacity":
-		game.PlayerShip.CargoCapacity += mod.StatValue
+		ship.CargoCapacity += mod.StatValue
 	case "passenger_slots":
-		game.PlayerShip.PassengerSlots += mod.StatValue
+		ship.PassengerSlots += mod.StatValue
 	case "max_fuel":
-		game.PlayerShip.MaxFuel += int64(mod.StatValue)
+		ship.MaxFuel += int64(mod.StatValue)
 	case "base_burn_rate":
-		game.PlayerShip.BaseBurnRate += int64(mod.StatValue)
+		ship.BaseBurnRate += int64(mod.StatValue)
 	}
 
 	return true
+}
+
+// -----------------------------------------------------------------------------
+// PERSISTENCE METHODS
+// -----------------------------------------------------------------------------
+
+// SaveGame triggers a save to 'savegame.yaml' in the game directory.
+func (a *App) SaveGame() string {
+	err := game.SaveGame("savegame.yaml")
+	if err != nil {
+		return "SAVE FAILED: " + err.Error()
+	}
+	return "GAME SAVED"
+}
+
+// LoadGame triggers a load from 'savegame.yaml'.
+func (a *App) LoadGame() string {
+	err := game.LoadGame("savegame.yaml")
+	if err != nil {
+		return "LOAD FAILED: " + err.Error()
+	}
+
+	// Force a UI refresh event immediately after loading
+	runtime.EventsEmit(a.ctx, "market_pulse", []string{"LOADED"})
+
+	return "GAME LOADED"
 }

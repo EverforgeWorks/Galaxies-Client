@@ -1,12 +1,14 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import type { Ship, GameState, Contract, Planet, ShipModule, TravelEvent, TravelResponse } from '../types';
-// These imports will work once you run 'wails dev' and the bindings are generated
 import { 
   GetShipState, GetPlanets, GetAvailableContracts, GetModules, 
   Travel, AcceptJob, DropJob, Refuel, BuyModule 
 } from '../../wailsjs/go/main/App';
 import { EventsOn } from '../../wailsjs/runtime/runtime';
+
+// CONFIGURATION CONSTANTS (Must match universe.yaml)
+const FUEL_MASS_PER_UNIT = 3;
 
 export const useGameStore = defineStore('game', () => {
     // --- STATE ---
@@ -17,7 +19,6 @@ export const useGameStore = defineStore('game', () => {
     const availableModules = ref<ShipModule[]>([]);
     const chatMessages = ref<any[]>([]);
 
-    // New: Store the latest events to be displayed in the popup
     const arrivalEvents = ref<TravelEvent[]>([]);
 
     const uiState = ref<GameState>({
@@ -27,7 +28,29 @@ export const useGameStore = defineStore('game', () => {
         showEvents: false
     });
 
-    // --- HELPER: Returns TRUE if successful, FALSE if failed ---
+    // --- GETTERS (Computed) ---
+    
+    // Calculates total physics mass: Base + Fuel + Cargo/Pax
+    const totalMass = computed(() => {
+        if (!ship.value) return 0;
+        
+        let mass = ship.value.base_mass;
+
+        // 1. Add Fuel Mass
+        mass += (ship.value.fuel * FUEL_MASS_PER_UNIT);
+
+        // 2. Add Contract Mass (Cargo & Passengers)
+        if (ship.value.active_contracts) {
+            const contractMass = ship.value.active_contracts.reduce((sum, c) => {
+                return sum + (c.quantity * c.mass_per_unit);
+            }, 0);
+            mass += contractMass;
+        }
+
+        return mass;
+    });
+
+    // --- HELPER ---
     async function performAction(actionName: string, actionFn: () => Promise<any>): Promise<boolean> {
         uiState.value.isLoading = true;
         uiState.value.lastError = null;
@@ -61,25 +84,17 @@ export const useGameStore = defineStore('game', () => {
         } catch (e) { console.error("Sync Error", e); }
     }
 
-    // NEW: Listen for Wails Events (Replaces WebSockets)
     function initGameEvents() {
         console.log("HOOKING INTO SHIP SYSTEMS...");
-        
-        // Listen for the Go 'market_pulse' event from app.go
         EventsOn("market_pulse", (updatedPlanets: string[]) => {
             console.log("MARKET UPDATE:", updatedPlanets);
-            // Refresh data if we are idle
             if (!uiState.value.isLoading) refreshAll();
         });
-
-        // Initial Load
         refreshAll();
     }
 
-    // UPDATED: Calls the Wails App.Travel method directly
     async function travel(destination: string): Promise<{ success: boolean, duration: number }> {
         let duration = 0;
-        
         uiState.value.isLoading = true;
         uiState.value.lastError = null;
 
@@ -87,14 +102,11 @@ export const useGameStore = defineStore('game', () => {
             const response = await Travel(destination);
             
             if (response.success) {
-                // FORCE CAST: Treat the response as compatible with our Ship type
                 ship.value = response.ship as Ship;
                 arrivalEvents.value = response.events;
                 duration = response.duration_seconds;
-                
                 return { success: true, duration };
             } else {
-                // FIX: Convert 'undefined' to 'null' for strict TS compliance
                 uiState.value.lastError = response.error || null;
                 uiState.value.isLoading = false;
                 return { success: false, duration: 0 };
@@ -106,12 +118,11 @@ export const useGameStore = defineStore('game', () => {
         }
     }
 
-    // Triggered by UI when ready to show the events (after animation)
     function revealEvents() {
         if (arrivalEvents.value.length > 0) {
             uiState.value.showEvents = true;
         }
-        uiState.value.isLoading = false; // Release lock
+        uiState.value.isLoading = false;
     }
 
     function clearEvents() {
@@ -153,6 +164,7 @@ export const useGameStore = defineStore('game', () => {
 
     return {
         ship, universe, availableJobs, availableModules, chatMessages, uiState, arrivalEvents,
+        totalMass, // Exported Getter
         refreshAll, initGameEvents, travel, acceptContract, dropContract, refuelShip, buyModule,
         revealEvents, clearEvents
     };
