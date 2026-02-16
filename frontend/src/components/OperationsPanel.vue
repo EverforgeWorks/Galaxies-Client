@@ -1,259 +1,255 @@
 <script setup lang="ts">
-/**
- * OpsPanel Component
- */
 import { ref, computed } from 'vue'
 import { useGameStore } from '../stores/gameStore'
+import type { Contract } from '../types'
 
 const store = useGameStore()
 
-// --- UI STATE ---
-const mode = ref('SHIP') 
+// --- TAB STATE ---
+type Tab = 'cargo' | 'passengers' | 'modules'
+const activeTab = ref<Tab>('cargo')
 
-const open = ref({
-    shipCargo: true,
-    shipPax: true,
-    shipMods: false,
-    planetMarket: true,
-    planetJobs: true,
-    planetShop: false
-})
-
-const toggle = (key: keyof typeof open.value) => { 
-    open.value[key] = !open.value[key] 
-}
-
-// --- HELPERS ---
-
-const getPlanetName = (key: string) => {
-    if (!store.universe) return key
-    const p = store.universe.find(x => x.key === key)
+// --- HELPER: Planet Name Lookup ---
+function getPlanetName(key: string): string {
+    const p = store.universe.find(p => p.key === key)
     return p ? p.name : key
 }
 
-const sortContracts = (a: any, b: any) => {
-    const destA = getPlanetName(a.destination_key)
-    const destB = getPlanetName(b.destination_key)
-    const nameCompare = destA.localeCompare(destB)
-    if (nameCompare !== 0) return nameCompare
-    return (b.payout || 0) - (a.payout || 0)
+// --- HELPER: Sorter ---
+// Sorts by Destination Name (A-Z), then Payout (High-to-Low)
+function contractSorter(a: Contract, b: Contract) {
+    const nameA = getPlanetName(a.destination_key)
+    const nameB = getPlanetName(b.destination_key)
+    
+    if (nameA !== nameB) {
+        return nameA.localeCompare(nameB)
+    }
+    return b.payout - a.payout
 }
 
-// --- COMPUTED DATA ---
+// --- COMPUTED DATA HELPERS ---
 
-// 1. SHIP: Cargo
-const shipCargo = computed(() => {
-    const list = store.ship?.active_contracts?.filter((c:any) => c.type === 'cargo') || []
-    return [...list].sort(sortContracts)
-})
-// New: Calculate total volume
-const cargoVolume = computed(() => shipCargo.value.reduce((sum, c) => sum + c.quantity, 0))
+// Cargo Logic
+const onboardCargo = computed(() => 
+    (store.ship?.active_contracts.filter(c => c.type === 'cargo') || []).sort(contractSorter)
+)
+const marketCargo = computed(() => 
+    (store.availableJobs.filter(c => c.type === 'cargo') || []).sort(contractSorter)
+)
 
-// 2. SHIP: Passengers
-const shipPax = computed(() => {
-    const list = store.ship?.active_contracts?.filter((c:any) => c.type === 'passenger') || []
-    return [...list].sort(sortContracts)
-})
-// New: Calculate total pax
-const paxCount = computed(() => shipPax.value.reduce((sum, c) => sum + c.quantity, 0))
+// Passenger Logic
+const onboardPassengers = computed(() => 
+    (store.ship?.active_contracts.filter(c => c.type === 'passenger') || []).sort(contractSorter)
+)
+const marketPassengers = computed(() => 
+    (store.availableJobs.filter(c => c.type === 'passenger') || []).sort(contractSorter)
+)
 
-// 3. SHIP: Modules
-const shipMods = computed(() => store.ship?.installed_modules || [])
+// Module Logic
+const installedModules = computed(() => 
+    store.ship?.installed_modules || []
+)
+const marketModules = computed(() => 
+    store.availableModules || []
+)
 
-// 4. PLANET: Market
-const planetMarket = computed(() => {
-    const list = store.availableJobs?.filter((j:any) => j.type === 'cargo') || []
-    return [...list].sort(sortContracts)
-})
+// --- ACTIONS ---
+function handleAccept(id: string) {
+    store.acceptContract(id)
+}
 
-// 5. PLANET: Jobs
-const planetJobs = computed(() => {
-    const list = store.availableJobs?.filter((j:any) => j.type === 'passenger') || []
-    return [...list].sort(sortContracts)
-})
+function handleDrop(id: string) {
+    if(confirm("Jettison this contract? You will not be paid.")) {
+        store.dropContract(id)
+    }
+}
 
-// 6. PLANET: Shop
-const planetShop = computed(() => store.availableModules || [])
-
+function handleBuyModule(key: string) {
+    if(confirm("Purchase and install this module?")) {
+        store.buyModule(key)
+    }
+}
 </script>
 
 <template>
   <div class="ops-panel">
     
-    <div v-if="store.uiState.lastError" class="global-error" @click="store.uiState.lastError = null">
-        ⚠ ERROR: {{ store.uiState.lastError }}
+    <div class="tabs-header">
+      <button class="tab-btn" :class="{ active: activeTab === 'cargo' }" @click="activeTab = 'cargo'">CARGO</button>
+      <button class="tab-btn" :class="{ active: activeTab === 'passengers' }" @click="activeTab = 'passengers'">PASSENGERS</button>
+      <button class="tab-btn" :class="{ active: activeTab === 'modules' }" @click="activeTab = 'modules'">MODULES</button>
     </div>
 
-    <div class="tabs">
-        <button :class="{ active: mode === 'SHIP' }" @click="mode = 'SHIP'">SHIP MANIFEST</button>
-        <button :class="{ active: mode === 'PLANET' }" @click="mode = 'PLANET'">PLANET SERVICES</button>
-    </div>
-
-    <div class="scroll-content">
+    <div class="tab-content">
+      
+      <div v-if="activeTab === 'cargo'" class="tab-pane">
         
-        <div v-if="mode === 'SHIP'">
+        <div class="section-block">
+            <div class="section-title">:: CARGO MANIFEST ({{ onboardCargo.length }} / {{ store.ship?.cargo_capacity }}) ::</div>
+            <div v-if="onboardCargo.length === 0" class="empty-msg">HOLD EMPTY</div>
             
-            <div class="section-header" @click="toggle('shipCargo')">
-                <span>:: CARGO HOLD ({{ cargoVolume }} / {{ store.ship?.cargo_capacity }})</span>
-                <span>{{ open.shipCargo ? '[-]' : '[+]' }}</span>
-            </div>
-            <div v-if="open.shipCargo" class="list-group">
-                <div v-for="item in shipCargo" :key="item.id" class="list-item">
-                    <div class="col-main">
-                        <span class="name">{{ item.item_name }} ({{ item.quantity }})</span>
-                        <span class="meta-sub">Val: {{ item.payout }}cr</span>
-                    </div>
-                    <span class="dest">-> {{ getPlanetName(item.destination_key) }}</span>
-                    <button class="btn-xs warn" @click="store.dropContract(item.id)">DUMP</button>
+            <div v-for="c in onboardCargo" :key="c.id" class="compact-row onboard">
+                <div class="col-main">
+                    <span class="name">{{ c.item_name }} ({{ c.quantity }})</span>
+                    <span class="dest">To: {{ getPlanetName(c.destination_key) }}</span>
                 </div>
-                <div v-if="!shipCargo.length" class="empty">-- EMPTY --</div>
-            </div>
-
-            <div class="section-header" @click="toggle('shipPax')">
-                <span>:: CABINS ({{ paxCount }} / {{ store.ship?.passenger_slots }})</span>
-                <span>{{ open.shipPax ? '[-]' : '[+]' }}</span>
-            </div>
-            <div v-if="open.shipPax" class="list-group">
-                <div v-for="pax in shipPax" :key="pax.id" class="list-item">
-                    <div class="col-main">
-                        <span class="name">PASSENGER</span>
-                        <span class="meta-sub">Fare: {{ pax.payout }}cr</span>
-                    </div>
-                    <span class="dest">-> {{ getPlanetName(pax.destination_key) }}</span>
-                    <button class="btn-xs warn" @click="store.dropContract(pax.id)">EJECT</button>
+                <div class="col-meta">
+                    <span class="pay">{{ c.payout }}cr</span>
+                    <button class="btn-xs btn-drop" @click="handleDrop(c.id)">DROP</button>
                 </div>
-                <div v-if="!shipPax.length" class="empty">-- EMPTY --</div>
-            </div>
-
-            <div class="section-header" @click="toggle('shipMods')">
-                <span>:: SYSTEMS ({{ shipMods.length }})</span>
-                <span>{{ open.shipMods ? '[-]' : '[+]' }}</span>
-            </div>
-            <div v-if="open.shipMods" class="list-group">
-                <div v-for="(mod, i) in shipMods" :key="i" class="list-item">
-                    <span class="name white">{{ mod.name }}</span>
-                    <span class="meta">{{ mod.stat_modifier }} +{{ mod.stat_value }}</span>
-                </div>
-                <div v-if="!shipMods.length" class="empty">-- STOCK CONFIG --</div>
             </div>
         </div>
 
-        <div v-if="mode === 'PLANET'">
-            <div class="section-header" @click="toggle('planetMarket')">
-                <span>:: LOCAL EXPORTS ({{ planetMarket.length }})</span>
-                <span>{{ open.planetMarket ? '[-]' : '[+]' }}</span>
-            </div>
-            <div v-if="open.planetMarket" class="list-group">
-                <div v-for="job in planetMarket" :key="job.id" class="list-item">
-                    <div class="col-main">
-                        <span class="name">{{ job.item_name }} ({{ job.quantity }})</span>
-                    </div>
-                    <span class="dest">-> {{ getPlanetName(job.destination_key) }}</span>
-                    <span class="pay">{{ job.payout }}cr</span>
-                    <button class="btn-xs" @click="store.acceptContract(job.id)">TAKE</button>
-                </div>
-                <div v-if="!planetMarket.length" class="empty">-- NO CONTRACTS --</div>
-            </div>
+        <div class="section-block">
+            <div class="section-title">:: LOCAL FREIGHT MARKET ::</div>
+            <div v-if="marketCargo.length === 0" class="empty-msg">NO JOBS AVAILABLE</div>
 
-            <div class="section-header" @click="toggle('planetJobs')">
-                <span>:: TRANSPORT REQUESTS ({{ planetJobs.length }})</span>
-                <span>{{ open.planetJobs ? '[-]' : '[+]' }}</span>
-            </div>
-            <div v-if="open.planetJobs" class="list-group">
-                <div v-for="job in planetJobs" :key="job.id" class="list-item">
-                    <div class="col-main">
-                        <span class="name">PASSENGER</span>
-                    </div>
-                    <span class="dest">-> {{ getPlanetName(job.destination_key) }}</span>
-                    <span class="pay">{{ job.payout }}cr</span>
-                    <button class="btn-xs" @click="store.acceptContract(job.id)">BOARD</button>
+            <div v-for="c in marketCargo" :key="c.id" class="compact-row market">
+                <div class="col-main">
+                    <span class="name">{{ c.item_name }} ({{ c.quantity }})</span>
+                    <span class="dest">-> {{ getPlanetName(c.destination_key) }}</span>
                 </div>
-                <div v-if="!planetJobs.length" class="empty">-- NO PASSENGERS --</div>
-            </div>
-
-            <div v-if="planetShop.length > 0">
-                <div class="section-header" @click="toggle('planetShop')">
-                    <span>:: OUTFITTING</span>
-                    <span>{{ open.planetShop ? '[-]' : '[+]' }}</span>
-                </div>
-                <div v-if="open.planetShop" class="list-group">
-                    <div v-for="mod in planetShop" :key="mod.key" class="list-item">
-                        <span class="name white">{{ mod.name }}</span>
-                        <span class="pay">{{ mod.cost }}cr</span>
-                        <button class="btn-xs" :disabled="(store.ship?.credits || 0) < mod.cost" @click="store.buyModule(mod.key)">BUY</button>
-                    </div>
+                <div class="col-meta">
+                    <span class="pay">{{ c.payout }}cr</span>
+                    <button class="btn-xs btn-accept" @click="handleAccept(c.id)" :disabled="store.uiState.isLoading">GET</button>
                 </div>
             </div>
-
         </div>
+      </div>
+
+      <div v-if="activeTab === 'passengers'" class="tab-pane">
+        
+        <div class="section-block">
+            <div class="section-title">:: PAX MANIFEST ({{ onboardPassengers.length }} / {{ store.ship?.passenger_slots }}) ::</div>
+            <div v-if="onboardPassengers.length === 0" class="empty-msg">CABINS EMPTY</div>
+
+            <div v-for="c in onboardPassengers" :key="c.id" class="compact-row onboard">
+                <div class="col-main">
+                    <span class="name">{{ c.item_name }} ({{ c.quantity }})</span>
+                    <span class="dest">To: {{ getPlanetName(c.destination_key) }}</span>
+                </div>
+                <div class="col-meta">
+                    <span class="pay">{{ c.payout }}cr</span>
+                    <button class="btn-xs btn-drop" @click="handleDrop(c.id)">EVICT</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-block">
+            <div class="section-title">:: TRANSPORT REQUESTS ::</div>
+            <div v-if="marketPassengers.length === 0" class="empty-msg">NO PASSENGERS WAITING</div>
+
+            <div v-for="c in marketPassengers" :key="c.id" class="compact-row market">
+                <div class="col-main">
+                    <span class="name">{{ c.item_name }} ({{ c.quantity }})</span>
+                    <span class="dest">-> {{ getPlanetName(c.destination_key) }}</span>
+                </div>
+                <div class="col-meta">
+                    <span class="pay">{{ c.payout }}cr</span>
+                    <button class="btn-xs btn-accept" @click="handleAccept(c.id)" :disabled="store.uiState.isLoading">BOARD</button>
+                </div>
+            </div>
+        </div>
+      </div>
+
+      <div v-if="activeTab === 'modules'" class="tab-pane">
+        <div class="section-block">
+            <div class="section-title">:: INSTALLED SYSTEMS ({{ installedModules.length }} / {{ store.ship?.max_module_slots }}) ::</div>
+            <div v-if="installedModules.length === 0" class="empty-msg">NO MODS INSTALLED</div>
+
+            <div v-for="(m, i) in installedModules" :key="i" class="compact-row installed">
+                <div class="col-main">
+                    <span class="name">{{ m.name }}</span>
+                    <span class="effect-sm">{{ m.stat_modifier }} +{{ m.stat_value }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-block">
+            <div class="section-title">:: SHIPYARD CATALOG ::</div>
+            <div v-if="marketModules.length === 0" class="empty-msg">NO UPGRADES HERE</div>
+
+            <div v-for="m in marketModules" :key="m.key" class="compact-row market">
+                <div class="col-main">
+                    <span class="name">{{ m.name }}</span>
+                    <span class="cost-sm">{{ m.cost }}cr</span>
+                </div>
+                <div class="col-meta">
+                     <span class="effect-sm">{{ m.stat_modifier }} {{ m.stat_value > 0 ? '+' : ''}}{{ m.stat_value }}</span>
+                     <button class="btn-xs btn-buy" @click="handleBuyModule(m.key)" :disabled="store.uiState.isLoading || (store.ship?.credits || 0) < m.cost">BUY</button>
+                </div>
+            </div>
+        </div>
+      </div>
 
     </div>
   </div>
 </template>
 
 <style scoped>
-/* Main Container */
-.ops-panel { display: flex; flex-direction: column; height: 100%; font-family: 'Courier New', monospace; }
-
-/* Global Error */
-.global-error {
-    background: #440000;
-    color: #ff5555;
-    border-bottom: 1px solid #ff0000;
-    padding: 8px;
-    text-align: center;
-    font-size: 0.8rem;
-    cursor: pointer;
-    font-weight: bold;
+.ops-panel {
+    display: flex; flex-direction: column; height: 100%;
+    font-family: 'Courier New', monospace;
+    background: #000;
 }
 
-/* Tabs */
-.tabs { display: flex; background: #001100; border-bottom: 1px solid #004400; flex-shrink: 0; }
-.tabs button {
-    flex: 1; background: transparent; border: none; color: #006600; 
-    padding: 8px; font-weight: bold; cursor: pointer; border-right: 1px solid #002200;
-    transition: all 0.2s; font-size: 0.8rem;
+/* TABS STYLING */
+.tabs-header {
+    display: flex;
+    border-bottom: 2px solid #004400;
+    background: #001100;
 }
-.tabs button.active { color: #000; background: #00ff41; }
 
-/* Content Area */
-.scroll-content { flex: 1; overflow-y: auto; padding-bottom: 20px; }
-
-/* Accordion Headers */
-.section-header {
-    background: #002200; color: #00ff41; padding: 5px 10px; font-size: 0.75rem;
-    border-bottom: 1px solid #004400; border-top: 1px solid #004400;
-    display: flex; justify-content: space-between; cursor: pointer; margin-top: 5px;
+.tab-btn {
+    flex: 1; background: transparent; border: none;
+    border-right: 1px solid #004400; color: #006600;
+    padding: 8px 5px; cursor: pointer; font-weight: bold;
+    font-family: inherit; font-size: 0.85rem;
+    transition: all 0.2s;
 }
-.section-header:hover { background: #003300; }
+.tab-btn:hover { background: #002200; color: #00ff41; }
+.tab-btn.active { background: #004400; color: #fff; text-shadow: 0 0 5px #00ff41; }
 
-/* List Items */
-.list-group { background: rgba(0,20,0,0.2); }
-.list-item {
+.tab-content { flex: 1; overflow-y: auto; padding: 10px; }
+
+/* SECTIONS */
+.section-block { margin-bottom: 20px; }
+.section-title { 
+    color: #008f11; border-bottom: 1px dashed #004400; 
+    margin-bottom: 8px; padding-bottom: 2px; font-size: 0.8rem;
+}
+.empty-msg { color: #004400; font-style: italic; text-align: center; margin: 10px 0; font-size: 0.8rem; }
+
+/* COMPACT ROWS */
+.compact-row {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 4px 10px; border-bottom: 1px solid rgba(0,68,0,0.3); font-size: 0.8rem;
+    background: rgba(0,20,0,0.3); border-bottom: 1px solid #002200;
+    padding: 4px 6px; font-size: 0.85rem;
 }
-.list-item:hover { background: rgba(0,255,65,0.05); }
+.compact-row:hover { background: rgba(0,40,0,0.5); }
+.compact-row.onboard { border-left: 2px solid #008f11; }
+.compact-row.market { border-left: 2px solid #004400; }
+.compact-row.installed { border-left: 2px solid #0066ff; }
 
-/* Column Layout for Items */
-.col-main { display: flex; flex-direction: column; flex: 2; margin-right: 5px; overflow: hidden; }
+.col-main { display: flex; align-items: center; gap: 8px; flex: 1; overflow: hidden; }
+.col-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
-/* Text Styles */
-.name { color: #00aa00; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.name.white { color: #ccc; }
-.dest { color: #006600; flex: 1; font-size: 0.7rem; text-align: left; }
-.pay { color: #fff; flex: 0 0 60px; text-align: right; margin-right: 10px; font-size: 0.75rem; }
-.meta { color: #006600; font-size: 0.7rem; }
-.meta-sub { color: #005500; font-size: 0.65rem; }
+.name { color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: bold; }
+.dest { color: #ffff00; font-size: 0.8rem; }
+.pay { color: #00ff41; font-weight: bold; }
+.cost-sm { color: #ffaa00; font-size: 0.8rem; }
+.effect-sm { color: #aaaaff; font-size: 0.75rem; font-style: italic; }
 
-/* Buttons */
-.btn-xs {
-    background: #004400; color: #00ff41; border: 1px solid #008f11;
-    font-size: 0.65rem; padding: 1px 6px; cursor: pointer;
+/* MINI BUTTONS */
+.btn-xs { 
+    font-family: inherit; font-weight: bold; cursor: pointer; border: none; 
+    padding: 2px 6px; font-size: 0.75rem; 
 }
-.btn-xs:hover { background: #00ff41; color: #000; }
-.btn-xs.warn:hover { background: #ff3333; color: #fff; }
-.btn-xs:disabled { opacity: 0.3; cursor: not-allowed; }
-
-.empty { font-style: italic; color: #004400; font-size: 0.7rem; padding: 5px 10px; }
+.btn-accept { background: #006600; color: #fff; }
+.btn-accept:hover { background: #00ff41; color: #000; }
+.btn-drop { background: #440000; color: #ffaaaa; }
+.btn-drop:hover { background: #ff0000; color: #fff; }
+.btn-buy { background: #aa6600; color: #000; }
+.btn-buy:hover { background: #ffaa00; }
+.btn-buy:disabled { background: #332200; color: #664400; cursor: not-allowed; }
 </style>

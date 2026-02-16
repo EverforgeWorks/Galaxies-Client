@@ -1,12 +1,7 @@
 <script setup lang="ts">
 /**
  * StarMap Component (Refactored)
- * Implements "Server-First" Navigation:
- * 1. User Clicks Warp
- * 2. Client sends request to Go Backend
- * 3. Awaits Success/Fail
- * 4. IF Success: Play Animation using snapshot of start coordinates
- * 5. IF Fail: Show Error, do not move.
+ * Server-First Navigation with Server-Authoritative Timing
  */
 
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
@@ -21,16 +16,18 @@ const selectedStar = ref<any>(null)
 
 // Animation State
 const isWarping = ref(false)
-const warpProgress = ref(0) // 0.0 to 1.0
+const warpProgress = ref(0)
 let animationFrameId: number | null = null
 let animationStartTime: number = 0
+
+// Current dynamic duration (ms)
+const currentWarpDuration = ref(2000)
 
 // Critical: Snapshot of where the ship WAS before the warp command succeeded
 const animationStartCoords = ref<number[]>([0,0])
 
 // --- CONSTANTS ---
 const GAME_WORLD_SIZE = 55 
-const WARP_DURATION_MS = 2500 
 
 // --- COMPUTED DATA ---
 const currentPlanetObj = computed(() => {
@@ -44,7 +41,7 @@ const flightPlan = computed(() => {
     const p1 = currentPlanetObj.value.coordinates || [0,0]
     const p2 = selectedStar.value.coordinates || [0,0]
     
-    // Euclidean distance
+    // Client-side estimation (Server has final say)
     const dist = Math.sqrt(Math.pow(p2[0]-p1[0], 2) + Math.pow(p2[1]-p1[1], 2))
     const cost = Math.ceil(dist * (store.ship.base_burn_rate || 1.0))
     
@@ -61,25 +58,26 @@ async function startWarpSequence() {
   if (isWarping.value || !flightPlan.value || !selectedStar.value) return
   if (!currentPlanetObj.value) return
 
-  // 1. Snapshot Start Position (Critical for animation)
+  // 1. Snapshot Start Position
   animationStartCoords.value = [...currentPlanetObj.value.coordinates]
 
-  // 2. Execute Server Call FIRST (Server-First Authority)
+  // 2. Execute Server Call
   const destKey = selectedStar.value.key
   
-  // This will await the Wails call. 
-  // If successful, store.ship.location_key updates immediately to the NEW planet.
-  const success = await store.travel(destKey)
+  // Call Store Action
+  const result = await store.travel(destKey)
 
-  // 3. If failed (e.g. 402 Payment Required), abort - Do not animate
-  if (!success) {
-      selectedStar.value = null // Deselect to clear state
+  // 3. Handle Failure
+  if (!result.success) {
+      selectedStar.value = null
       return
   }
 
-  // 4. If success, Play Animation
-  // Note: store.ship.location_key is ALREADY the new planet now.
-  // We use animationStartCoords to draw the ship at the "Old" location and lerp to "New".
+  // 4. Handle Success & Start Animation
+  // Set duration based on server response (Seconds -> MS)
+  // We clamp it to a minimum of 1s for visual clarity
+  currentWarpDuration.value = Math.max(result.duration * 1000, 1000)
+  
   isWarping.value = true
   warpProgress.value = 0
   animationStartTime = performance.now()
@@ -90,8 +88,8 @@ function animateFrame() {
   const now = performance.now()
   const elapsed = now - animationStartTime
   
-  // Calculate normalized progress (0 to 1)
-  const progress = Math.min(elapsed / WARP_DURATION_MS, 1.0)
+  // Calculate normalized progress (0 to 1) based on Dynamic Duration
+  const progress = Math.min(elapsed / currentWarpDuration.value, 1.0)
   warpProgress.value = progress
 
   draw() 
@@ -104,8 +102,10 @@ function animateFrame() {
     animationFrameId = null
     selectedStar.value = null
     
-    // Trigger a full data refresh to get new market data/contracts for the new planet
+    // Trigger store update for market data
     store.refreshAll()
+    // Trigger Event Popup (if any events occurred)
+    store.revealEvents()
   }
 }
 
@@ -365,7 +365,7 @@ watch(() => [store.universe, store.ship?.location_key, flightPlan.value], draw, 
 
       <div v-if="flightPlan" class="trip-stats">
         <div class="stat-line"><span>DIST:</span><span>{{ flightPlan.distance }} LY</span></div>
-        <div class="stat-line"><span>FUEL:</span><span :class="{ 'alert': !flightPlan.canAfford }">{{ flightPlan.cost }} UNITS</span></div>
+        <div class="stat-line"><span>COST:</span><span :class="{ 'alert': !flightPlan.canAfford }">{{ flightPlan.cost }} FUEL</span></div>
       </div>
       
       <button 

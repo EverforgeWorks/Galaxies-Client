@@ -1,26 +1,31 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
-import { useGameStore } from './stores/gameStore' // Converted to use store
+import { onMounted, ref } from 'vue'
+import { useGameStore } from './stores/gameStore'
 
 import StarMap from './components/StarMap.vue'
 import ShipStatus from './components/ShipStatus.vue'
 import OperationsPanel from './components/OperationsPanel.vue'
-import ChatLog from './components/ChatLog.vue'
-import { ref } from 'vue'
+import EventPopup from './components/EventPopup.vue'
 
 const store = useGameStore()
-const chatCollapsed = ref(false)
 
 // Bootstrapping
 onMounted(() => { 
+    // Load initial data
     store.refreshAll()
-    store.connectSocket()
+    // Initialize Wails Event Listeners (replacing WebSockets)
+    // Ensure you have updated gameStore.ts to contain this method
+    if (store.initGameEvents) {
+        store.initGameEvents()
+    }
 })
 </script>
 
 <template>
   <div class="terminal-grid">
     <div class="scanline"></div>
+
+    <EventPopup />
 
     <div class="col-left">
       
@@ -32,13 +37,12 @@ onMounted(() => {
         <OperationsPanel />
       </div>
 
-      <div class="section-comms" :class="{ 'collapsed': chatCollapsed }">
-        <div class="panel-header" @click="chatCollapsed = !chatCollapsed">
-          <span>:: COMMS ::</span>
-          <span class="toggle-icon">{{ chatCollapsed ? '▲' : '▼' }}</span>
+      <div class="section-comms">
+        <div class="panel-header">
+            <span>:: SYSTEM LOG ::</span>
         </div>
-        <div class="comms-content" v-show="!chatCollapsed">
-          <ChatLog />
+        <div class="comms-content">
+            <div class="log-placeholder">OFFLINE MODE ACTIVE</div>
         </div>
       </div>
 
@@ -95,16 +99,11 @@ onMounted(() => {
 }
 
 .section-comms {
-  height: 200px; /* Default Height */
+  height: 150px; /* Reduced Height since it's just a log now */
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  transition: height 0.3s ease;
   border-top: 1px solid #004400;
-}
-
-.section-comms.collapsed {
-  height: 30px; /* Header only */
 }
 
 .panel-header {
@@ -113,16 +112,23 @@ onMounted(() => {
   padding: 4px 10px;
   font-size: 0.75rem;
   letter-spacing: 2px;
-  cursor: pointer;
   display: flex;
   justify-content: space-between;
 }
-.panel-header:hover { background: #003300; color: #fff; }
 
 .comms-content {
   flex: 1;
   overflow: hidden;
   background: rgba(0,0,0,0.8);
+  padding: 10px;
+}
+
+.log-placeholder {
+    color: #004400;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    text-align: center;
+    margin-top: 20px;
 }
 
 .scanline {

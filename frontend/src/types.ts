@@ -1,5 +1,3 @@
-// frontend/src/types.ts
-
 export interface ShipModule {
     key: string;
     name: string;
@@ -11,13 +9,29 @@ export interface ShipModule {
 
 export interface Contract {
     id: string;
-    type: "cargo" | "passenger";
+    // CHANGED: Relaxed from "cargo" | "passenger" to string to match Go backend
+    type: string; 
     item_name: string;
     quantity: number;
     payout: number;
     origin_key: string;
     destination_key: string;
     mass_per_unit: number;
+}
+
+export interface TravelEvent {
+    type: string;
+    description: string;
+    effect: string;
+}
+
+export interface TravelResponse {
+    success: boolean;
+    ship: Ship;
+    events: TravelEvent[];
+    duration_seconds: number;
+    // ADDED: Optional operator (?) to handle omitempty
+    error?: string; 
 }
 
 export interface Ship {
@@ -27,14 +41,13 @@ export interface Ship {
     max_fuel: number;
     location_key: string;
     
-    // New Engine Stats
     base_burn_rate: number;
     burn_damping: number;
     base_mass: number;
 
     cargo_capacity: number;
     passenger_slots: number;
-    
+    max_module_slots: number;
     installed_modules: ShipModule[];
     active_contracts: Contract[];
 }
@@ -45,11 +58,9 @@ export interface Planet {
     coordinates: number[];
 }
 
-// Added to satisfy the store's need for "GameState"
 export interface GameState {
     isDocked: boolean;
     isLoading: boolean;
     lastError: string | null;
+    showEvents: boolean;
 }
-
-export type Player = Ship;
